@@ -26,7 +26,7 @@ class Model(nn.Module):
         # Y_tilde = None
         if self.rev_in:
             x = self.revin_layer(x, 'norm')
-        result = self.decoder(x, return_rep) # (B, L, V, T)
+        result = self.decoder(x, return_rep=return_rep) # (B, L, V, T)  # fix: was passed positionally into x_mark
         if return_rep:
             ys, reps = result
         else:
