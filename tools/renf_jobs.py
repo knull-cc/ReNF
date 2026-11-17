@@ -506,16 +506,33 @@ def cmd_diag(a):
                   flush=True)
         for m in SEG.findall(read(str(out.relative_to(REPO)))):
             seg, nf, first, final, mem, amb, ens, corr = m
-            if int(nf) < 2:
-                continue
             rows.append(dict(variant=j.get('variant', 'base'), dataset=j['script'], H=j['pred_len'],
-                             seed=j['seed'], seg=int(seg), first=float(first), final=float(final),
+                             seed=j['seed'], seg=int(seg), n_f=int(nf), first=float(first), final=float(final),
                              member=float(mem), amb=float(amb), ens=float(ens), corr=float(corr)))
     if not rows:
         print('no diagnostics parsed (single-stage models have none)')
         return
     df = pd.DataFrame(rows)
     df.to_csv(LOG_ROOT / 'diag_all.csv', index=False)
+
+    # final-stage MSE per horizon segment, and its change vs base (paired by seed)
+    seg = df.pivot_table(index=['dataset', 'H', 'seed', 'seg'], columns='variant', values='final').reset_index()
+    variants = [v for v in df.variant.unique()]
+    if 'base' in variants and len(variants) > 1:
+        print('Final-stage MSE per horizon segment (seg 1 = earliest steps); % = paired change vs base')
+        out = []
+        for (ds, H, sg), grp in seg.groupby(['dataset', 'H', 'seg']):
+            row = dict(dataset=ds, H=H, seg=sg, base=grp['base'].mean())
+            for v in variants:
+                if v != 'base' and v in grp:
+                    row[v] = f"{grp[v].mean():.4f} ({((grp[v] / grp['base'] - 1) * 100).mean():+.2f}%)"
+            out.append(row)
+        print(pd.DataFrame(out).to_string(index=False, float_format=lambda x: f'{x:.4f}'))
+        print()
+
+    df = df[df.n_f > 1]          # stage-agreement statistics need >= 2 stages forecasting the segment
+    if df.empty:
+        return
     g = df.groupby(['variant', 'dataset', 'H'], sort=False).agg(
         seeds=('seed', 'nunique'), err_corr=('corr', 'mean'),
         amb_ratio=('amb', 'sum'), member=('member', 'sum'),
