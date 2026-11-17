@@ -28,6 +28,10 @@ are launched:
            (scripts/exchange.sh), the one with the lowest validation loss
            is selected -- test loss is never used for selection.
   stop     Stops the background runner and its training processes.
+  eta      Re-tests finished jobs from their checkpoints (no training) with
+           --eta_probe 1: shrinkage of the last stage towards the previous stage on
+           their shared prefix, eta fitted on validation; compares eta = 1 (official),
+           0, 0.5 and the validation fit on the test set.
   diag     Re-tests finished jobs from their saved checkpoints (no training) with
            --diag 1 and summarises the stage diagnostics: how different the stage
            forecasts are (ambiguity), how correlated their errors are, and how much
@@ -551,6 +555,85 @@ def cmd_diag(a):
     print('avg_vs_final_%: averaging all stages vs using the final stage, on the shared segments')
 
 
+def retest(jobs, flags, suffix, marker, gpu, force):
+    """Re-run the test phase of finished jobs from their saved checkpoints with extra flags."""
+    env = dict(os.environ, CUDA_VISIBLE_DEVICES=str(gpu), PYTHONUNBUFFERED='1')
+    texts = {}
+    for i, j in enumerate(jobs):
+        rel = j['log'] + suffix
+        if force or marker not in read(rel):
+            args = to_pairs(j['args'])
+            for k, v in [('--is_training', '0'), ('--probe', '0')] + flags:
+                set_arg(args, k, v)
+            with open(REPO / rel, 'w') as fh:
+                rc = subprocess.run([sys.executable, '-u', 'run_longExp.py'] + flatten(args), cwd=REPO,
+                                    stdout=fh, stderr=subprocess.STDOUT, env=env).returncode
+            print(f'[{i + 1}/{len(jobs)}] {j["name"]}' + ('' if rc == 0 else f'  FAILED (rc={rc}, see {rel})'),
+                  flush=True)
+        texts[j['name']] = read(rel)
+    return texts
+
+
+def select_done(a, default_variants=('base',)):
+    variants = a.variants or list(default_variants)
+    return [j for j in load_jobs().values() if is_done(j)
+            and (not a.datasets or j['script'] in a.datasets)
+            and j.get('variant', 'base') in variants
+            and (not a.horizons or j['pred_len'] in a.horizons)]
+
+
+def cmd_eta(a):
+    import pandas as pd
+    pd.set_option('display.width', 250)
+    jobs = select_done(a)
+    if not jobs:
+        sys.exit('no finished jobs match')
+    texts = retest(jobs, [('--eta_probe', '1'), ('--diag', '0')], '.eta', 'eta_fit', a.gpu, a.force)
+    PR = re.compile(r'^eta_probe (\w+) eta=(\S+) mse=(\S+) mae=(\S+) prefix_mse=(\S+)', re.M)
+    FIT = re.compile(r'^eta_fit (.*)$', re.M)
+    rows, fits = [], []
+    for j in jobs:
+        t = texts[j['name']]
+        f = FIT.search(t)
+        if not f:
+            continue
+        fit = dict(kv.split('=') for kv in f.group(1).split())
+        fits.append(dict(dataset=j['script'], H=j['pred_len'], seed=j['seed'], **{k: float(v) for k, v in fit.items()}))
+        for name, eta, mse, mae, pm in PR.findall(t):
+            rows.append(dict(dataset=j['script'], H=j['pred_len'], seed=j['seed'], strategy=name,
+                             eta=float(eta), mse=float(mse), mae=float(mae), prefix_mse=float(pm)))
+    if not rows:
+        print('no eta results parsed (single-stage models have none)')
+        return
+    df = pd.DataFrame(rows)
+    df.to_csv(LOG_ROOT / 'eta_all.csv', index=False)
+    ref = df[df.strategy == 'eta1'].set_index(['dataset', 'H', 'seed'])
+    df = df.join(ref[['mse', 'mae', 'prefix_mse']].add_suffix('_ref'), on=['dataset', 'H', 'seed'])
+    for c in ['mse', 'mae', 'prefix_mse']:
+        df['d_' + c] = (df[c] / df[c + '_ref'] - 1) * 100
+    order = ['eta1', 'eta0', 'eta05', 'etaval', 'etatrain', 'etaoracle']
+    g = df.groupby(['dataset', 'H', 'strategy']).agg(
+        seeds=('seed', 'nunique'), eta=('eta', 'mean'), eta_sd=('eta', 'std'), mse=('mse', 'mean'),
+        d_mse=('d_mse', 'mean'), d_mse_sd=('d_mse', 'std'), d_mae=('d_mae', 'mean'),
+        d_prefix=('d_prefix_mse', 'mean'), d_prefix_sd=('d_prefix_mse', 'std')).reset_index()
+    g['o'] = g.strategy.map({k: i for i, k in enumerate(order)})
+    g = g.sort_values(['dataset', 'H', 'o']).drop(columns='o')
+    show = g.copy()
+    show['eta'] = [f'{m:.3f} \u00b1 {s:.3f}' for m, s in zip(g.eta, g.eta_sd.fillna(0))]
+    show['mse'] = g.mse.map(lambda x: f'{x:.4f}')
+    show['vs_eta1'] = [f'{m:+.2f}% \u00b1 {s:.2f}' for m, s in zip(g.d_mse, g.d_mse_sd.fillna(0))]
+    show['mae_vs_eta1'] = g.d_mae.map(lambda x: f'{x:+.2f}%')
+    show['prefix_vs_eta1'] = [f'{m:+.2f}% \u00b1 {s:.2f}' for m, s in zip(g.d_prefix, g.d_prefix_sd.fillna(0))]
+    print(show[['dataset', 'H', 'strategy', 'seeds', 'eta', 'mse', 'vs_eta1', 'mae_vs_eta1', 'prefix_vs_eta1']]
+          .to_string(index=False))
+    fd = pd.DataFrame(fits)
+    fd.to_csv(LOG_ROOT / 'eta_fits.csv', index=False)
+    print('\nFitted eta per seed (val = used; val_half1/2 = stability over time; train; test_oracle = diagnostic only):')
+    print(fd.to_string(index=False, float_format=lambda x: f'{x:.4f}'))
+    print('\neta1 = official output. etaval = eta fitted on validation and frozen (the only legitimate new number). '
+          'etaoracle uses test labels and is an upper bound, never a result. prefix = the shared prefix only.')
+
+
 # ----------------------------------------------------------------------------- main
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -586,6 +669,13 @@ def main():
     d.add_argument('--gpu', type=int, default=0)
     d.add_argument('--force', action='store_true', help='recompute even if a .diag file exists')
 
+    e = sub.add_parser('eta', help='post-hoc last-stage shrinkage probe from saved checkpoints (no training)')
+    e.add_argument('--datasets', nargs='+', default=None)
+    e.add_argument('--variants', nargs='+', default=None, help='default: base')
+    e.add_argument('--horizons', nargs='+', type=int, default=None)
+    e.add_argument('--gpu', type=int, default=0)
+    e.add_argument('--force', action='store_true')
+
     sub.add_parser('status')
     c = sub.add_parser('collect')
     c.add_argument('--detail', action='store_true', help='also print the per-horizon table for every variant')
@@ -594,7 +684,7 @@ def main():
 
     a = ap.parse_args()
     {'build': cmd_build, 'run': cmd_run, 'status': cmd_status,
-     'collect': cmd_collect, 'stop': cmd_stop, 'diag': cmd_diag}[a.cmd](a)
+     'collect': cmd_collect, 'stop': cmd_stop, 'diag': cmd_diag, 'eta': cmd_eta}[a.cmd](a)
 
 
 if __name__ == '__main__':

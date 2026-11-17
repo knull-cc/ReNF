@@ -119,6 +119,58 @@ class Exp_Main(Exp_Basic):
         print('diag_summary ambiguity_ratio={:.4f} err_corr={:.4f} refine_gain={:+.2f}%'.format(
             tot(5) / tot(4), tot(7), float(np.mean([(r[3] / r[2] - 1) * 100 for r in rows if r[1] > 1]))))
 
+    def _stage_outputs(self, loader):
+        """All stage forecasts and targets of a loader, in loader order (eval mode, no dropout)."""
+        f_dim = -1 if self.args.features == 'MS' else 0
+        outs, ys = None, []
+        self.model.eval()
+        with torch.no_grad():
+            for batch_x, batch_y, _, _ in loader:
+                o = self.model(batch_x.float().to(self.device))
+                if outs is None:
+                    outs = [[] for _ in o]
+                for j, t in enumerate(o):
+                    outs[j].append(t[:, :, f_dim:].cpu().numpy())
+                ys.append(batch_y.float()[:, -self.args.pred_len:, f_dim:].numpy())
+        return [np.concatenate(x, axis=0) for x in outs], np.concatenate(ys, axis=0)
+
+    def _eta_probe(self):
+        """Shrink the last stage towards the previous one on their shared prefix:
+            out[:h] = p + eta * (u[:h] - p),  out[h:] = u[h:]   (eta = 1 is the official output)
+        Risk identity: R(eta) = R(0) - 2 eta a + eta^2 b, a = sum<y - p, u - p>, b = sum|u - p|^2,
+        so eta* = clip(a / b, 0, 1). eta is FITTED ON VALIDATION and frozen before touching test."""
+        vo, vy = self._stage_outputs(self.vali_loader)
+        if len(vo) < 2:
+            return
+        to, ty = self._stage_outputs(self.test_loader)
+        h = vo[-2].shape[1]
+
+        def ab(o, y):
+            p, d = o[-2], o[-1][:, :h] - o[-2]
+            return float(((y[:, :h] - p) * d).sum()), float((d * d).sum())
+
+        def fit(a, b):
+            return (a / b if b > 0 else 1.0), (min(max(a / b, 0.0), 1.0) if b > 0 else 1.0)
+
+        raw_val, eta_val = fit(*ab(vo, vy))
+        m = len(vy) // 2
+        _, eta_h1 = fit(*ab([x[:m] for x in vo], vy[:m]))
+        _, eta_h2 = fit(*ab([x[m:] for x in vo], vy[m:]))
+        _, eta_tr = fit(*ab(*self._stage_outputs(self.train_loader)))
+        raw_te, eta_te = fit(*ab(to, ty))          # ORACLE (uses test labels) -- diagnostic only
+
+        p, u = to[-2], to[-1]
+        for name, eta in [('eta1', 1.0), ('eta0', 0.0), ('eta05', 0.5), ('etaval', eta_val), ('etatrain', eta_tr),
+                          ('etaoracle', eta_te)]:
+            out = u.copy()
+            out[:, :h] = p + eta * (u[:, :h] - p)
+            e = out - ty
+            print('eta_probe {} eta={:.4f} mse={:.6f} mae={:.6f} prefix_mse={:.6f}'.format(
+                name, eta, float((e ** 2).mean()), float(np.abs(e).mean()), float((e[:, :h] ** 2).mean())))
+        print('eta_fit val={:.4f} val_raw={:.4f} val_half1={:.4f} val_half2={:.4f} train={:.4f} '
+              'test_oracle={:.4f} test_oracle_raw={:.4f} shared_prefix={}'.format(
+                  eta_val, raw_val, eta_h1, eta_h2, eta_tr, eta_te, raw_te, h))
+
     def _get_data(self, flag):
         data_set, data_loader = data_provider(self.args, flag, pred_len=None)
         return data_set, data_loader
@@ -468,6 +520,8 @@ class Exp_Main(Exp_Basic):
         for n in range(len(reps)):
             rep_store['rep'+str(n)] = reps[n].detach().cpu().numpy()
         np.save('./rep_store.npy', rep_store)
+        if self.args.eta_probe:
+            self._eta_probe()
         if self.args.diag:
             self._stage_diagnostics([np.concatenate([b[j] for b in stage_outs], axis=0)
                                      for j in range(len(stage_outs[0]))],

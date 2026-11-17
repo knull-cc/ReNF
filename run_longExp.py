@@ -49,6 +49,9 @@ if __name__ == '__main__':
                         help='time-domain training loss (official: l1)')
     parser.add_argument('--probe', type=int, default=1,
                         help='extra test-time probes printed as probe_* lines; never change training or the mse: line')
+    parser.add_argument('--eta_probe', type=int, default=0,
+                        help='post-hoc shrinkage of the last stage towards the previous stage on their shared prefix; '
+                             'eta fitted on the validation set, printed as eta_* lines (test-time only)')
     parser.add_argument('--diag', type=int, default=0,
                         help='print stage diagnostics (ambiguity decomposition, error correlation) as diag_* lines')
     # DLinear
