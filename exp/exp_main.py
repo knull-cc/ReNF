@@ -34,6 +34,8 @@ class Exp_Main(Exp_Basic):
         L = 1
         self.d_inputs = [T, L, V]
         self.model = self._build_model().to(self.device)
+        self._set_feedback(self.model, scale=0.0 if self.args.fb_mode == 'zero' else 1.0,
+                           detach=None if self.args.fb_detach < 0 else bool(self.args.fb_detach))
 
         input = torch.zeros(1, T, V).to(self.device)
         flops, params = profile(self.model, inputs=(input, ))
@@ -54,6 +56,35 @@ class Exp_Main(Exp_Basic):
         if self.args.use_multi_gpu and self.args.use_gpu:
             model = nn.DataParallel(model, device_ids=self.args.device_ids)
         return model
+
+    def _set_feedback(self, model, scale=None, shuffle=None, detach=None):
+        for m in model.modules():
+            if type(m).__name__ == 'DecoderBlock':
+                if scale is not None:
+                    m.fb_scale = scale
+                if shuffle is not None:
+                    m.fb_shuffle = shuffle
+                if detach is not None:
+                    m.fb_detach = detach
+
+    def _feedback_probes(self, trues):
+        """Test-time only, same trained weights: last-stage forecast when the fed-back
+        forecasts are zeroed, or swapped with another sample's (batch roll by B/2)."""
+        blocks = [m for m in self.model.modules() if type(m).__name__ == 'DecoderBlock']
+        if self.args.fb_mode == 'zero' or not blocks or max(m.n_c for m in blocks) < 2:
+            return
+        f_dim = -1 if self.args.features == 'MS' else 0
+        self.model.eval()
+        for name, kw in [('fbzero', dict(scale=0.0)), ('fbshuffle', dict(shuffle=True))]:
+            self._set_feedback(self.model, **kw)
+            preds = []
+            with torch.no_grad():
+                for batch_x, batch_y, _, _ in self.test_loader:
+                    out = self.model(batch_x.float().to(self.device))
+                    preds.append(out[-1][:, :, f_dim:].detach().cpu().numpy())
+            self._set_feedback(self.model, scale=1.0, shuffle=False)
+            mae, mse = metric(np.concatenate(preds, axis=0).flatten(), trues)
+            print('probe_{} mse:{}, mae:{}'.format(name, mse, mae))
 
     def _get_data(self, flag):
         data_set, data_loader = data_provider(self.args, flag, pred_len=None)
@@ -124,7 +155,10 @@ class Exp_Main(Exp_Basic):
     def time_freq_loss(self, y_hat, y, alpha_freq):
         freq_loss = (torch.fft.rfft(y_hat, dim=1) - torch.fft.rfft(y, dim=1)).abs().mean()
         # weights = (20. / (torch.arange(y_hat.shape[1], dtype=torch.float32, device=y_hat.device) + 1.0)).unsqueeze(0).unsqueeze(-1)
-        time_loss = (y_hat - y).abs().mean()
+        if self.args.time_loss == 'l2':
+            time_loss = ((y_hat - y) ** 2).mean()
+        else:
+            time_loss = (y_hat - y).abs().mean()
         return alpha_freq * freq_loss + (1 - alpha_freq) * time_loss
     
     # def time_freq_loss2(self, y_hat, y, alpha_freq):
@@ -193,8 +227,17 @@ class Exp_Main(Exp_Basic):
 
                     loss = 0.
                     gamma = 20.
+                    total_w = sum(gamma / (i + 1) for i in range(n))
                     for j in range(n):
-                        loss += gamma / (j + 1) * self.time_freq_loss(outputs[j], batch_y[:, :(j + 1) * k, f_dim:], self.args.alpha_freq)
+                        if self.args.stage_weight == 'harmonic':      # official
+                            w = gamma / (j + 1)
+                        elif self.args.stage_weight == 'uniform':
+                            w = total_w / n
+                        else:                                         # 'last'
+                            if j < n - 1:
+                                continue
+                            w = total_w
+                        loss += w * self.time_freq_loss(outputs[j], batch_y[:, :(j + 1) * k, f_dim:], self.args.alpha_freq)
                     # loss = self.time_freq_loss(outputs[-1], batch_y[:, :, f_dim:], self.args.alpha_freq)
                     train_loss.append(loss.item())
   
@@ -343,6 +386,7 @@ class Exp_Main(Exp_Basic):
         all_preds = []
         all_trues = []
         all_pred_coms = []
+        all_avgs = []
         # all_reps = []
         
         self.model.eval()
@@ -367,6 +411,14 @@ class Exp_Main(Exp_Basic):
                 pred = outputs[-1][:, :, f_dim:].detach().cpu().numpy()
                 true = batch_y[:, :, f_dim:].detach().cpu().numpy()
                 pred_com = self.post_process(outputs, batch_y, i).detach().cpu().numpy()
+                # non-oracle combination: average of all stage forecasts where they overlap
+                avg = torch.zeros_like(batch_y)
+                cnt = torch.zeros_like(batch_y)
+                for o in outputs:
+                    L = min(o.shape[1], batch_y.shape[1])
+                    avg[:, :L] += o[:, :L]
+                    cnt[:, :L] += 1
+                all_avgs.append((avg / cnt.clamp(min=1))[:, :, f_dim:].detach().cpu().numpy())
                 # Collect batch results
                 all_preds.append(pred)
                 all_trues.append(true)
@@ -394,7 +446,11 @@ class Exp_Main(Exp_Basic):
         mae, mse = metric(preds, trues)
         mae_com, mse_com = metric(pred_coms, trues)
         print('mse:{}, mae:{}'.format(mse, mae))
-        print('mse_com:{}, mae_com:{}'.format(mse_com, mae_com))
+        print('mse_com:{}, mae_com:{}'.format(mse_com, mae_com))   # ORACLE (uses ground truth) -- never report
+        if self.args.probe:
+            mae_a, mse_a = metric(np.concatenate(all_avgs, axis=0).flatten(), trues)
+            print('probe_stageavg mse:{}, mae:{}'.format(mse_a, mae_a))
+            self._feedback_probes(trues)
         f = open("result.txt", 'a')
         f.write(setting + "  \n")
         f.write('mse:{}, mae:{}'.format(mse, mae))

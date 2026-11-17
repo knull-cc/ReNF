@@ -36,6 +36,19 @@ if __name__ == '__main__':
     parser.add_argument('--label_len', type=int, default=0, help='start token length')
     parser.add_argument('--pred_len', type=int, default=96, help='prediction sequence length')
     parser.add_argument('--alpha_freq', type=float, default=0., help='weight of frequency domain loss')
+    # ablation switches -- every default reproduces the official ReNF behaviour
+    parser.add_argument('--fb_mode', type=str, default='pred', choices=['pred', 'zero'],
+                        help='pred: feed earlier-stage forecasts to later stages (official); zero: feed zeros '
+                             '(stages, widths and stage losses unchanged, only the forecast feedback removed)')
+    parser.add_argument('--fb_detach', type=int, default=-1,
+                        help='-1: model default (alpha detaches the feedback, beta does not); 0/1: force')
+    parser.add_argument('--stage_weight', type=str, default='harmonic', choices=['harmonic', 'uniform', 'last'],
+                        help='stage-loss weights: harmonic 20/(j+1) (official); uniform (same total); '
+                             'last: only the final stage is supervised (same total)')
+    parser.add_argument('--time_loss', type=str, default='l1', choices=['l1', 'l2'],
+                        help='time-domain training loss (official: l1)')
+    parser.add_argument('--probe', type=int, default=1,
+                        help='extra test-time probes printed as probe_* lines; never change training or the mse: line')
     # DLinear
     #parser.add_argument('--individual', action='store_true', default=False, help='DLinear: a linear layer for each variate(channel) individually')
 

@@ -29,6 +29,11 @@ are launched:
            is selected -- test loss is never used for selection.
   stop     Stops the background runner and its training processes.
 
+Ablations: `build --tag NAME --extra "--flag value ..."` adds the same official
+jobs with extra/overriding flags (e.g. --fb_mode zero, --r_ema 0.0, --d_layers 1).
+The tag is appended to model_id, so checkpoints never collide; `collect` then
+prints one row per (dataset, variant) with the paired seed-wise change vs base.
+
 Typical Colab use (from the repo root):
   python tools/renf_jobs.py build --datasets etth1 etth2 ettm1 ettm2 weather exchange --seeds 2021
   nohup python tools/renf_jobs.py run --max_parallel 6 > logs/colab/runner.out 2>&1 &
@@ -39,6 +44,7 @@ import argparse
 import json
 import os
 import re
+import shlex
 import signal
 import subprocess
 import sys
@@ -67,6 +73,9 @@ bash "$1"
 
 MSE_RE = re.compile(r'^mse:\s*([-\d.eE+naif]+),\s*mae:\s*([-\d.eE+naif]+)', re.M)
 VALI_RE = re.compile(r'Vali Loss:\s*([-\d.eE+naif]+)')
+PROBE_RE = re.compile(r'^probe_(\w+) mse:\s*([-\d.eE+naif]+),\s*mae:\s*([-\d.eE+naif]+)', re.M)
+PARAMS_RE = re.compile(r'params:\s*([-\d.eE+]+)M')
+PROBES = ['stageavg', 'fbzero', 'fbshuffle']
 
 
 def now():
@@ -163,6 +172,10 @@ def cmd_build(a):
             data_file = os.path.join(root if os.path.isabs(root) else str(REPO / root),
                                      get_arg(pairs, '--data_path', ''))
             set_arg(pairs, '--num_workers', str(a.num_workers))
+            for k, v in to_pairs(shlex.split(a.extra)):
+                set_arg(pairs, k, v)
+            if a.tag != 'base':
+                set_arg(pairs, '--model_id', get_arg(pairs, '--model_id') + '__' + a.tag)
             for seed in a.seeds:
                 p = [list(x) for x in pairs]
                 set_arg(p, '--random_seed', str(seed))
@@ -171,7 +184,7 @@ def cmd_build(a):
                 name = f'{model}_{model_id}_s{seed}'
                 if name in jobs:
                     print(f'  [warn] duplicate job {name}: keeping the later one (as bash would)')
-                jobs[name] = dict(name=name, script=ds, model=model, model_id=model_id,
+                jobs[name] = dict(name=name, script=ds, variant=a.tag, model=model, model_id=model_id,
                                   pred_len=pred_len, seq_len=int(get_arg(p, '--seq_len')),
                                   seed=seed, args=flatten(p),
                                   log=str((LOG_ROOT / ds / f'{name}.log').relative_to(REPO)))
@@ -186,7 +199,7 @@ def cmd_build(a):
         old.update(jobs)
         jobs = old
     JOBS_FILE.write_text(json.dumps(jobs, indent=1))
-    print(f'-> {len(jobs)} jobs written to {JOBS_FILE.relative_to(REPO)}')
+    print(f'-> {len(jobs)} jobs in {JOBS_FILE.relative_to(REPO)}' + (f' (variant {a.tag}: {a.extra})' if a.tag != 'base' else ''))
 
 
 # ----------------------------------------------------------------------------- helpers
@@ -234,6 +247,8 @@ def cmd_run(a):
     jobs = list(load_jobs().values())
     if a.datasets:
         jobs = [j for j in jobs if j['script'] in a.datasets]
+    if a.variants:
+        jobs = [j for j in jobs if j.get('variant', 'base') in a.variants]
     pid = runner_alive()
     if pid and pid != os.getpid():
         sys.exit(f'A runner is already active (pid {pid}). Use `stop` first.')
@@ -323,7 +338,8 @@ def cmd_status(a):
     per = OrderedDict()
     active, failed = [], []
     for j in jobs:
-        c = per.setdefault(j['script'], Counter())
+        v = j.get('variant', 'base')
+        c = per.setdefault(j['script'] + ('' if v == 'base' else '/' + v), Counter())
         if is_done(j):
             c['done'] += 1
         elif failed_marker(j).exists():
@@ -335,9 +351,10 @@ def cmd_status(a):
             active.append(f'{j["name"]} (epoch {ep})')
         else:
             c['pending'] += 1
-    print(f'{"dataset":12s} {"done":>5s} {"run":>5s} {"fail":>5s} {"pend":>5s}')
+    w = max([12] + [len(k) for k in per])
+    print(f'{"dataset":{w}s} {"done":>5s} {"run":>5s} {"fail":>5s} {"pend":>5s}')
     for ds, c in per.items():
-        print(f'{ds:12s} {c["done"]:5d} {c["running"]:5d} {c["failed"]:5d} {c["pending"]:5d}')
+        print(f'{ds:{w}s} {c["done"]:5d} {c["running"]:5d} {c["failed"]:5d} {c["pending"]:5d}')
     if active:
         print('running:\n  ' + '\n  '.join(active))
     if failed:
@@ -355,52 +372,100 @@ def cmd_stop(a):
 
 # ----------------------------------------------------------------------------- collect
 def cmd_collect(a):
+    import numpy as np
     import pandas as pd
-    pd.set_option('display.width', 200)
+    pd.set_option('display.width', 250)
+    pd.set_option('display.max_columns', 30)
+    jobs = list(load_jobs().values())
+    ds_order = list(OrderedDict.fromkeys(j['script'] for j in jobs))
+    var_order = list(OrderedDict.fromkeys(['base'] + [j.get('variant', 'base') for j in jobs]))
     rows = []
-    for j in load_jobs().values():
+    for j in jobs:
         text = read(j['log'])
         m = MSE_RE.search(text)
         if not m:
             continue
         vali = [float(v) for v in VALI_RE.findall(text)]
-        rows.append(dict(dataset=j['script'], H=j['pred_len'], seed=j['seed'], model=j['model'],
-                         config=j['model_id'], seq_len=j['seq_len'],
-                         mse=float(m.group(1)), mae=float(m.group(2)),
-                         best_vali=min(vali) if vali else float('inf'), epochs=len(vali)))
+        pm = PARAMS_RE.search(text)
+        v = j.get('variant', 'base')
+        row = dict(variant=v, dataset=j['script'], H=j['pred_len'], seed=j['seed'],
+                   config=j['model_id'].replace('__' + v, ''), seq_len=j['seq_len'],
+                   mse=float(m.group(1)), mae=float(m.group(2)),
+                   best_vali=min(vali) if vali else float('inf'), epochs=len(vali),
+                   params_M=float(pm.group(1)) if pm else np.nan)
+        for name, mse, _ in PROBE_RE.findall(text):
+            row['p_' + name] = float(mse)
+        rows.append(row)
     if not rows:
         print('no finished jobs yet')
         return
     df = pd.DataFrame(rows)
+    for p in PROBES:
+        if 'p_' + p not in df:
+            df['p_' + p] = np.nan
+        df['d_' + p] = (df['p_' + p] / df['mse'] - 1) * 100       # % change of test MSE under the probe
     df.to_csv(LOG_ROOT / 'results_all.csv', index=False)
 
-    # one config per (dataset, H): lowest validation loss averaged over seeds
-    mv = df.groupby(['dataset', 'H', 'config'])['best_vali'].mean().reset_index()
-    best = mv.loc[mv.groupby(['dataset', 'H'])['best_vali'].idxmin(), ['dataset', 'H', 'config']]
-    sel = df.merge(best, on=['dataset', 'H', 'config'])
-    agg = sel.groupby(['dataset', 'H'], sort=False).agg(
-        mse=('mse', 'mean'), mse_std=('mse', 'std'), mae=('mae', 'mean'), mae_std=('mae', 'std'),
-        seeds=('seed', 'nunique'), seq_len=('seq_len', lambda s: '/'.join(map(str, sorted(set(s))))),
-        config=('config', lambda s: ' '.join(sorted(set(s))))).reset_index()
-    order = {d: i for i, d in enumerate(OrderedDict.fromkeys(j['script'] for j in load_jobs().values()))}
-    agg = agg.sort_values(['dataset', 'H'], key=lambda c: c.map(order) if c.name == 'dataset' else c)
-
-    avg = agg.groupby('dataset', sort=False).agg(mse=('mse', 'mean'), mae=('mae', 'mean'),
-                                                 n_H=('H', 'count')).reset_index()
-    agg.to_csv(LOG_ROOT / 'results_table.csv', index=False)
-    avg.to_csv(LOG_ROOT / 'results_avg.csv', index=False)
-
+    # one config per (variant, dataset, H): lowest validation loss averaged over seeds (only matters for grids)
+    keys = ['variant', 'dataset', 'H']
+    mv = df.groupby(keys + ['config'])['best_vali'].mean().reset_index()
+    best = mv.loc[mv.groupby(keys)['best_vali'].idxmin(), keys + ['config']]
+    sel = df.merge(best, on=keys + ['config'])
+    srt = lambda c: c.map({d: i for i, d in enumerate(ds_order)}) if c.name == 'dataset' else \
+        (c.map({v: i for i, v in enumerate(var_order)}) if c.name == 'variant' else c)
     fmt = lambda x: f'{x:.4f}' if pd.notna(x) else '-'
-    show = agg.copy()
-    for c in ['mse', 'mse_std', 'mae', 'mae_std']:
-        show[c] = show[c].map(fmt)
-    print(show.to_string(index=False))
-    print('\nAverage over horizons (n_H < 4 means some horizons are still missing):')
-    print(avg.assign(mse=avg.mse.map(fmt), mae=avg.mae.map(fmt)).to_string(index=False))
-    if (df.groupby(['dataset', 'H', 'seed']).size() > 1).any():
-        print('\nGrid datasets: one config per H, picked by validation loss averaged over seeds; '
-              'all configs are in results_all.csv')
-    print(f'\nCSV files in {LOG_ROOT.relative_to(REPO)}/')
+    pct = lambda x: f'{x:+.1f}%' if pd.notna(x) else '-'
+
+    # ---- per-horizon table
+    agg = sel.groupby(keys, sort=False).agg(
+        mse=('mse', 'mean'), mse_std=('mse', 'std'), mae=('mae', 'mean'), mae_std=('mae', 'std'),
+        seeds=('seed', 'nunique'), seq_len=('seq_len', lambda x: '/'.join(map(str, sorted(set(x))))),
+        config=('config', lambda x: ' '.join(sorted(set(x)))),
+        **{p: ('d_' + p, 'mean') for p in PROBES}).reset_index().sort_values(keys, key=srt)
+    agg.to_csv(LOG_ROOT / 'results_table.csv', index=False)
+    multi = sel['variant'].nunique() > 1
+    show = agg if (a.detail or not multi) else agg[agg.variant == 'base']
+    if len(show):
+        t = show.drop(columns=[] if multi else ['variant']).copy()
+        for c in ['mse', 'mse_std', 'mae', 'mae_std']:
+            t[c] = t[c].map(fmt)
+        for p in PROBES:
+            t[p] = t[p].map(pct)
+        print(('Per horizon (all variants):' if a.detail and multi else 'Per horizon (base):') if multi else 'Per horizon:')
+        print(t.to_string(index=False))
+
+    # ---- summary: horizon-average per seed, then mean/sd over seeds; paired change vs base
+    hs = sel.groupby(['variant', 'dataset', 'seed']).agg(
+        mse=('mse', 'mean'), mae=('mae', 'mean'), Hs=('H', lambda x: tuple(sorted(x))),
+        params_M=('params_M', 'mean'), **{p: ('d_' + p, 'mean') for p in PROBES}).reset_index()
+    base = hs[hs.variant == 'base'][['dataset', 'seed', 'Hs', 'mse']].rename(columns={'mse': 'mse_base'})
+    hs = hs.merge(base, on=['dataset', 'seed', 'Hs'], how='left')
+    hs['dvb'] = (hs['mse'] / hs['mse_base'] - 1) * 100
+    summ = hs.groupby(['dataset', 'variant'], sort=False).agg(
+        n_H=('Hs', lambda x: len(x.iloc[0])), seeds=('seed', 'nunique'),
+        mse=('mse', 'mean'), sd=('mse', 'std'), mae=('mae', 'mean'),
+        vs_base=('dvb', 'mean'), vs_base_sd=('dvb', 'std'), paired=('dvb', 'count'),
+        params_M=('params_M', 'mean'), **{p: (p, 'mean') for p in PROBES}).reset_index()
+    summ = summ.sort_values(['dataset', 'variant'], key=srt)
+    summ.to_csv(LOG_ROOT / 'results_summary.csv', index=False)
+    t = summ.copy()
+    for c in ['mse', 'sd', 'mae']:
+        t[c] = t[c].map(fmt)
+    t['vs_base'] = [('-' if v == 'base' else f'{m:+.2f}% \u00b1 {s:.2f} (n={n})') if pd.notna(m) else '-'
+                    for v, m, s, n in zip(summ.variant, summ.vs_base, summ.vs_base_sd.fillna(0), summ.paired)]
+    t['params_M'] = summ.params_M.map(lambda x: f'{x:.2f}' if pd.notna(x) else '-')
+    for p in PROBES:
+        t[p] = summ[p].map(pct)
+    t = t.drop(columns=['vs_base_sd', 'paired'])
+    print('\nAverage over horizons (mse/sd: mean/sd over seeds; vs_base: paired seed-wise % change of MSE, '
+          'negative = better):')
+    print(t.to_string(index=False))
+    print('\nprobe columns = % change of test MSE when, at test time only, the final output is replaced by the '
+          'average of all stage forecasts (stageavg), or the fed-back forecasts are zeroed (fbzero) / '
+          'taken from another sample (fbshuffle). mse_com in the logs is an oracle and is never used.')
+    if (df.groupby(keys + ['seed']).size() > 1).any():
+        print('Grid datasets: one config per (variant, H), picked by validation loss averaged over seeds.')
+    print(f'\nCSV files in {LOG_ROOT.relative_to(REPO)}/  (results_all / results_table / results_summary)')
 
 
 # ----------------------------------------------------------------------------- main
@@ -417,6 +482,8 @@ def main():
                    help='folder holding ETT-small/, weather/, exchange_rate/ ... (default: official ../dataset)')
     b.add_argument('--num_workers', type=int, default=2)
     b.add_argument('--append', action='store_true', help='add to the existing jobs file instead of replacing it')
+    b.add_argument('--tag', default='base', help='variant name for ablations (default: base = official)')
+    b.add_argument('--extra', default='', help='extra/overriding run_longExp.py flags, e.g. "--fb_mode zero"')
 
     r = sub.add_parser('run', help='run jobs in parallel (resumable)')
     r.add_argument('--max_parallel', type=int, default=4)
@@ -426,9 +493,11 @@ def main():
     r.add_argument('--oom_retries', type=int, default=2)
     r.add_argument('--retry_failed', action='store_true')
     r.add_argument('--datasets', nargs='+', default=None, help='only run these datasets from the jobs file')
+    r.add_argument('--variants', nargs='+', default=None, help='only run these variants from the jobs file')
 
     sub.add_parser('status')
-    sub.add_parser('collect')
+    c = sub.add_parser('collect')
+    c.add_argument('--detail', action='store_true', help='also print the per-horizon table for every variant')
     sub.add_parser('stop')
 
     a = ap.parse_args()
