@@ -88,6 +88,37 @@ class Exp_Main(Exp_Basic):
             mae, mse = metric(np.concatenate(preds, axis=0).flatten(), trues)
             print('probe_{} mse:{}, mae:{}'.format(name, mse, mae))
 
+    def _stage_diagnostics(self, outs, y):
+        """outs[j]: (N, h_j, V) forecast of stage j (h_j = (j+1)k); y: (N, L, V).
+        On every segment, compare the stages that forecast it:
+          ambiguity decomposition  MSE(mean) = mean_j MSE(f_j) - mean_j |f_j - mean|^2
+          (the second term = diversity; if ~0, averaging can never help)."""
+        n = len(outs)
+        if n < 2:
+            return
+        k = outs[0].shape[1]
+        rows = []
+        for s in range(n):
+            a, b = s * k, (s + 1) * k
+            fs = [o[:, a:b] for o in outs[s:]]           # stages s..n-1 all forecast segment s
+            yt = y[:, a:b]
+            mse = [float(((f - yt) ** 2).mean()) for f in fs]
+            if len(fs) > 1:
+                avg = np.mean(fs, axis=0)
+                amb = float(np.mean([((f - avg) ** 2).mean() for f in fs]))
+                e = np.stack([(f - yt).reshape(-1) for f in fs])
+                c = np.corrcoef(e)
+                corr = float(c[~np.eye(len(fs), dtype=bool)].mean())
+                ens = float(((avg - yt) ** 2).mean())
+            else:
+                amb, corr, ens = 0.0, 1.0, mse[0]
+            rows.append((s + 1, len(fs), mse[0], mse[-1], float(np.mean(mse)), amb, ens, corr))
+            print('diag_seg {} n_f={} first={:.5f} final={:.5f} mean_member={:.5f} '
+                  'ambiguity={:.6f} ensemble={:.5f} err_corr={:.4f}'.format(*rows[-1]))
+        tot = lambda i: float(np.mean([r[i] for r in rows if r[1] > 1]))
+        print('diag_summary ambiguity_ratio={:.4f} err_corr={:.4f} refine_gain={:+.2f}%'.format(
+            tot(5) / tot(4), tot(7), float(np.mean([(r[3] / r[2] - 1) * 100 for r in rows if r[1] > 1]))))
+
     def _get_data(self, flag):
         data_set, data_loader = data_provider(self.args, flag, pred_len=None)
         return data_set, data_loader
@@ -389,6 +420,7 @@ class Exp_Main(Exp_Basic):
         all_trues = []
         all_pred_coms = []
         all_avgs = []
+        stage_outs = []
         # all_reps = []
         
         self.model.eval()
@@ -421,6 +453,8 @@ class Exp_Main(Exp_Basic):
                     avg[:, :L] += o[:, :L]
                     cnt[:, :L] += 1
                 all_avgs.append((avg / cnt.clamp(min=1))[:, :, f_dim:].detach().cpu().numpy())
+                if self.args.diag:
+                    stage_outs.append([o[:, :, f_dim:].detach().cpu().numpy() for o in outputs])
                 # Collect batch results
                 all_preds.append(pred)
                 all_trues.append(true)
@@ -434,6 +468,10 @@ class Exp_Main(Exp_Basic):
         for n in range(len(reps)):
             rep_store['rep'+str(n)] = reps[n].detach().cpu().numpy()
         np.save('./rep_store.npy', rep_store)
+        if self.args.diag:
+            self._stage_diagnostics([np.concatenate([b[j] for b in stage_outs], axis=0)
+                                     for j in range(len(stage_outs[0]))],
+                                    np.concatenate(all_trues, axis=0))
         # Efficient concatenation and flattening
         preds = np.concatenate(all_preds, axis=0).flatten()
         trues = np.concatenate(all_trues, axis=0).flatten()

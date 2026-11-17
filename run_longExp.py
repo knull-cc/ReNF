@@ -49,6 +49,8 @@ if __name__ == '__main__':
                         help='time-domain training loss (official: l1)')
     parser.add_argument('--probe', type=int, default=1,
                         help='extra test-time probes printed as probe_* lines; never change training or the mse: line')
+    parser.add_argument('--diag', type=int, default=0,
+                        help='print stage diagnostics (ambiguity decomposition, error correlation) as diag_* lines')
     # DLinear
     #parser.add_argument('--individual', action='store_true', default=False, help='DLinear: a linear layer for each variate(channel) individually')
 

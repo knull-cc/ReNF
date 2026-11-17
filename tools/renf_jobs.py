@@ -28,6 +28,10 @@ are launched:
            (scripts/exchange.sh), the one with the lowest validation loss
            is selected -- test loss is never used for selection.
   stop     Stops the background runner and its training processes.
+  diag     Re-tests finished jobs from their saved checkpoints (no training) with
+           --diag 1 and summarises the stage diagnostics: how different the stage
+           forecasts are (ambiguity), how correlated their errors are, and how much
+           later stages improve the segments earlier stages already forecast.
 
 Ablations: `build --tag NAME --extra "--flag value ..."` adds the same official
 jobs with extra/overriding flags (e.g. --fb_mode zero, --r_ema 0.0, --d_layers 1).
@@ -475,6 +479,61 @@ def cmd_collect(a):
     print(f'\nCSV files in {LOG_ROOT.relative_to(REPO)}/  (results_all / results_table / results_summary)')
 
 
+def cmd_diag(a):
+    import numpy as np
+    import pandas as pd
+    pd.set_option('display.width', 250)
+    jobs = [j for j in load_jobs().values() if is_done(j)
+            and (not a.datasets or j['script'] in a.datasets)
+            and (not a.variants or j.get('variant', 'base') in a.variants)
+            and (not a.horizons or j['pred_len'] in a.horizons)]
+    if not jobs:
+        sys.exit('no finished jobs match')
+    env = dict(os.environ, CUDA_VISIBLE_DEVICES=str(a.gpu), PYTHONUNBUFFERED='1')
+    SEG = re.compile(r'^diag_seg (\d+) n_f=(\d+) first=(\S+) final=(\S+) mean_member=(\S+) '
+                     r'ambiguity=(\S+) ensemble=(\S+) err_corr=(\S+)', re.M)
+    rows = []
+    for i, j in enumerate(jobs):
+        out = REPO / (j['log'] + '.diag')
+        if a.force or 'diag_summary' not in read(str(out.relative_to(REPO))):
+            args = to_pairs(j['args'])
+            for k, v in [('--is_training', '0'), ('--diag', '1'), ('--probe', '0')]:
+                set_arg(args, k, v)
+            with open(out, 'w') as fh:
+                rc = subprocess.run([sys.executable, '-u', 'run_longExp.py'] + flatten(args), cwd=REPO,
+                                    stdout=fh, stderr=subprocess.STDOUT, env=env).returncode
+            print(f'[{i + 1}/{len(jobs)}] {j["name"]}' + ('' if rc == 0 else f'  FAILED (rc={rc}, see {out})'),
+                  flush=True)
+        for m in SEG.findall(read(str(out.relative_to(REPO)))):
+            seg, nf, first, final, mem, amb, ens, corr = m
+            if int(nf) < 2:
+                continue
+            rows.append(dict(variant=j.get('variant', 'base'), dataset=j['script'], H=j['pred_len'],
+                             seed=j['seed'], seg=int(seg), first=float(first), final=float(final),
+                             member=float(mem), amb=float(amb), ens=float(ens), corr=float(corr)))
+    if not rows:
+        print('no diagnostics parsed (single-stage models have none)')
+        return
+    df = pd.DataFrame(rows)
+    df.to_csv(LOG_ROOT / 'diag_all.csv', index=False)
+    g = df.groupby(['variant', 'dataset', 'H'], sort=False).agg(
+        seeds=('seed', 'nunique'), err_corr=('corr', 'mean'),
+        amb_ratio=('amb', 'sum'), member=('member', 'sum'),
+        refine=('final', 'sum'), first=('first', 'sum'), ens=('ens', 'sum')).reset_index()
+    g['diversity_%'] = g.amb_ratio / g.member * 100            # share of member error removable by averaging
+    g['refine_%'] = (g.refine / g['first'] - 1) * 100            # later stages vs the stage that first forecast a segment
+    g['avg_vs_final_%'] = (g.ens / g.refine - 1) * 100           # averaging stages vs final stage, on shared segments
+    g = g[['variant', 'dataset', 'H', 'seeds', 'err_corr', 'diversity_%', 'refine_%', 'avg_vs_final_%']]
+    g.to_csv(LOG_ROOT / 'diag_summary.csv', index=False)
+    print(g.to_string(index=False, float_format=lambda x: f'{x:.3f}'))
+    print('\nerr_corr: correlation of the stages\' errors on the segments they share (1 = identical mistakes)')
+    print('diversity_%: spread of stage forecasts around their mean, as % of their MSE '
+          '(= the most that averaging them could remove)')
+    print('refine_%: MSE change from the stage that first forecast a segment to the final stage (negative = later '
+          'stages correct earlier ones)')
+    print('avg_vs_final_%: averaging all stages vs using the final stage, on the shared segments')
+
+
 # ----------------------------------------------------------------------------- main
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -503,6 +562,13 @@ def main():
     r.add_argument('--variants', nargs='+', default=None, help='only run these variants from the jobs file')
     r.add_argument('--horizons', nargs='+', type=int, default=None, help='only run these pred_lens, e.g. 96')
 
+    d = sub.add_parser('diag', help='stage diagnostics from saved checkpoints (no training)')
+    d.add_argument('--datasets', nargs='+', default=None)
+    d.add_argument('--variants', nargs='+', default=['base'])
+    d.add_argument('--horizons', nargs='+', type=int, default=None)
+    d.add_argument('--gpu', type=int, default=0)
+    d.add_argument('--force', action='store_true', help='recompute even if a .diag file exists')
+
     sub.add_parser('status')
     c = sub.add_parser('collect')
     c.add_argument('--detail', action='store_true', help='also print the per-horizon table for every variant')
@@ -511,7 +577,7 @@ def main():
 
     a = ap.parse_args()
     {'build': cmd_build, 'run': cmd_run, 'status': cmd_status,
-     'collect': cmd_collect, 'stop': cmd_stop}[a.cmd](a)
+     'collect': cmd_collect, 'stop': cmd_stop, 'diag': cmd_diag}[a.cmd](a)
 
 
 if __name__ == '__main__':
