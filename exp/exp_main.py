@@ -69,7 +69,9 @@ class Exp_Main(Exp_Basic):
 
     def _feedback_probes(self, trues):
         """Test-time only, same trained weights: last-stage forecast when the fed-back
-        forecasts are zeroed, or swapped with another sample's (batch roll by B/2)."""
+        forecasts are zeroed, or swapped with another sample's (roll by B/2 inside a
+        fixed 256-window batch, i.e. a window 128 steps away, whatever the train batch size)."""
+        from torch.utils.data import DataLoader
         blocks = [m for m in self.model.modules() if type(m).__name__ == 'DecoderBlock']
         if self.args.fb_mode == 'zero' or not blocks or max(m.n_c for m in blocks) < 2:
             return
@@ -79,7 +81,7 @@ class Exp_Main(Exp_Basic):
             self._set_feedback(self.model, **kw)
             preds = []
             with torch.no_grad():
-                for batch_x, batch_y, _, _ in self.test_loader:
+                for batch_x, batch_y, _, _ in DataLoader(self.test_data, batch_size=256, shuffle=False):
                     out = self.model(batch_x.float().to(self.device))
                     preds.append(out[-1][:, :, f_dim:].detach().cpu().numpy())
             self._set_feedback(self.model, scale=1.0, shuffle=False)

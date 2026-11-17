@@ -249,6 +249,8 @@ def cmd_run(a):
         jobs = [j for j in jobs if j['script'] in a.datasets]
     if a.variants:
         jobs = [j for j in jobs if j.get('variant', 'base') in a.variants]
+    if a.horizons:
+        jobs = [j for j in jobs if j['pred_len'] in a.horizons]
     pid = runner_alive()
     if pid and pid != os.getpid():
         sys.exit(f'A runner is already active (pid {pid}). Use `stop` first.')
@@ -400,6 +402,11 @@ def cmd_collect(a):
         print('no finished jobs yet')
         return
     df = pd.DataFrame(rows)
+    if a.horizons:
+        df = df[df.H.isin(a.horizons)]
+        if df.empty:
+            print('no finished jobs for these horizons yet')
+            return
     for p in PROBES:
         if 'p_' + p not in df:
             df['p_' + p] = np.nan
@@ -494,10 +501,12 @@ def main():
     r.add_argument('--retry_failed', action='store_true')
     r.add_argument('--datasets', nargs='+', default=None, help='only run these datasets from the jobs file')
     r.add_argument('--variants', nargs='+', default=None, help='only run these variants from the jobs file')
+    r.add_argument('--horizons', nargs='+', type=int, default=None, help='only run these pred_lens, e.g. 96')
 
     sub.add_parser('status')
     c = sub.add_parser('collect')
     c.add_argument('--detail', action='store_true', help='also print the per-horizon table for every variant')
+    c.add_argument('--horizons', nargs='+', type=int, default=None, help='only use these pred_lens, e.g. 96')
     sub.add_parser('stop')
 
     a = ap.parse_args()
