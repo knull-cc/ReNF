@@ -67,6 +67,29 @@ class Exp_Main(Exp_Basic):
                 if detach is not None:
                     m.fb_detach = detach
 
+    def _blocks(self, model):
+        return [m for m in model.modules() if type(m).__name__ == 'DecoderBlock']
+
+    def _set_fb_override(self, model, outs):
+        blocks = self._blocks(model)
+        for b, o in zip(blocks, outs if outs is not None else [None] * len(blocks)):
+            b.fb_override = o
+
+    @torch.no_grad()
+    def _ema_feedback(self, batch_x):
+        """Stage forecasts of the EMA model for this batch (eval mode: no dropout), inside the decoder."""
+        was_training = self.model_pre.training
+        self.model_pre.eval()
+        blocks = self._blocks(self.model_pre)
+        for b in blocks:
+            b.fb_capture = True
+        self.model_pre(batch_x)
+        outs = [b.last_out for b in blocks]
+        for b in blocks:
+            b.fb_capture, b.last_out = False, None
+        self.model_pre.train(was_training)
+        return outs
+
     def _feedback_probes(self, trues):
         """Test-time only, same trained weights: last-stage forecast when the fed-back
         forecasts are zeroed, or swapped with another sample's (roll by B/2 inside a
@@ -269,6 +292,14 @@ class Exp_Main(Exp_Basic):
         scheduler = torch.optim.lr_scheduler.StepLR(model_optim, step_size=2, gamma=self.args.gamma)
         self.model.train()
         self.model_pre = copy.deepcopy(self.model).requires_grad_(False)
+        use_ema_fb = self.args.fb_source == 'ema'
+        if self.args.fb_ema_start >= 0:
+            ema_start = self.args.fb_ema_start
+        else:
+            ema_start = int(round(1.0 / (1.0 - self.args.r_ema))) if self.args.r_ema < 1 else 0
+        global_step, ema_fb_steps = 0, 0
+        if use_ema_fb:
+            print('fb_source=ema: EMA-model feedback from training step {}'.format(ema_start))
         valid_losses = []
         test_losses = []
         for epoch in range(self.args.train_epochs):
@@ -294,7 +325,11 @@ class Exp_Main(Exp_Basic):
                     pass
                 else:
                     if 'test' in self.args.model or 'ReNF' in self.args.model:
+                            if use_ema_fb and global_step >= ema_start:
+                                self._set_fb_override(self.model, self._ema_feedback(batch_x))
+                                ema_fb_steps += 1
                             outputs = self.model(batch_x)
+                            self._set_fb_override(self.model, None)
                             n = len(outputs)
                             k = self.args.pred_len // n
                     else:
@@ -342,6 +377,7 @@ class Exp_Main(Exp_Basic):
                     model_optim.step()
                     with torch.no_grad():
                         self.model_pre = self._update_model_ema(self.model_pre, self.model, decay=self.args.r_ema)
+                    global_step += 1
                 # store the weight of each layer
                 # if (epoch == self.args.train_epochs - 1) and (i == train_steps - 5):
                 #     weights = []
@@ -374,6 +410,8 @@ class Exp_Main(Exp_Basic):
         # plt.clf()
         # plt.plot()
         # plt.savefig('./toy_exp/test_loss_' + self.args.model_id + '_' + str(self.args.r_ema) + '.pdf')
+        if use_ema_fb:
+            print('fb_source=ema: used on {} of {} training steps'.format(ema_fb_steps, global_step))
         best_model_path = path + '/' + 'checkpoint.pth'
         self.model.load_state_dict(torch.load(best_model_path))
 

@@ -184,6 +184,7 @@ class DecoderBlock(nn.Module):
         self.cascade = nn.ModuleList([ForeBlock(d_in, self.pred_base, d_ff, drop_ff)])
         self.n_c = n_c
         self.fb_scale, self.fb_shuffle, self.fb_detach = 1.0, False, False  # official: not detached
+        self.fb_override, self.fb_capture, self.last_out = None, False, None
 
         for i in range(1, n_c):
             n_acc = i * (i + 1) // 2
@@ -197,9 +198,13 @@ class DecoderBlock(nn.Module):
 
     def _feedback(self, out):
         """Earlier-stage forecasts fed to the next stage (ablation switches; defaults = official)."""
-        y_cat = torch.cat(out, dim=-1)
-        if self.fb_detach:
-            y_cat = y_cat.detach()
+        if self.fb_override is not None and self.training:
+            # --fb_source ema: earlier-stage forecasts of the EMA model (no grad), set by Exp_Main
+            y_cat = torch.cat(self.fb_override[:len(out)], dim=-1)
+        else:
+            y_cat = torch.cat(out, dim=-1)
+            if self.fb_detach:
+                y_cat = y_cat.detach()
         if self.fb_shuffle and not self.training and y_cat.shape[0] > 1:
             # test-time probe: give each sample the feedback of another sample in the batch
             y_cat = torch.roll(y_cat, shifts=y_cat.shape[0] // 2, dims=0)
@@ -217,6 +222,8 @@ class DecoderBlock(nn.Module):
                 reps.append(rep)
             out.append(y_k)
             x_k = torch.cat([x0, self._feedback(out)], dim=-1)  # official: cat(out) * 1.0
+        if self.fb_capture:
+            self.last_out = [o.detach() for o in out]
         if return_rep:
             return out, reps
         else:

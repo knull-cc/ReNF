@@ -49,6 +49,12 @@ if __name__ == '__main__':
                         help='time-domain training loss (official: l1)')
     parser.add_argument('--probe', type=int, default=1,
                         help='extra test-time probes printed as probe_* lines; never change training or the mse: line')
+    parser.add_argument('--fb_source', type=str, default='online', choices=['online', 'ema'],
+                        help='online: training feedback = the online model\'s own earlier stages (official); '
+                             'ema: the EMA model\'s earlier-stage forecasts (eval mode), i.e. what the evaluated '
+                             'model feeds back at test time')
+    parser.add_argument('--fb_ema_start', type=int, default=-1,
+                        help='training step from which ema feedback is used (-1: round(1/(1-r_ema)))')
     parser.add_argument('--eta_probe', type=int, default=0,
                         help='post-hoc shrinkage of the last stage towards the previous stage on their shared prefix; '
                              'eta fitted on the validation set, printed as eta_* lines (test-time only)')
