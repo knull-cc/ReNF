@@ -798,6 +798,11 @@ class Exp_Main(Exp_Basic):
 
         # np.save(folder_path + 'metrics.npy', np.array([mae, mse, rmse, mape, mspe,rse, corr]))
         np.save(folder_path + 'pred.npy', preds)
+        # per-horizon-step test MSE (for where-does-the-gain-come-from diagnostics)
+        _P, _Y = np.concatenate(all_preds, axis=0), np.concatenate(all_trues, axis=0)
+        _hm = ((_P - _Y) ** 2).mean(axis=(0, 2))
+        print('horizon_mse: ' + ' '.join('{:.5f}'.format(v) for v in _hm))
+        np.save(folder_path + 'horizon_mse.npy', _hm)
         if self.args.save_sample:
             P, Y = np.concatenate(all_preds, axis=0), np.concatenate(all_trues, axis=0)
             np.save(folder_path + 'sample_mse.npy', ((P - Y) ** 2).mean(axis=(1, 2)))

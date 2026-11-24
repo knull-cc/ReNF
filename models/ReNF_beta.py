@@ -16,6 +16,7 @@ class Model(nn.Module):
         """
         super(Model, self).__init__()
         self.rev_in = configs.revin
+        self.anchor_in = getattr(configs, 'anchor_in', 'none')
         self.pred_len = configs.pred_len
         self.L = configs.level_dim
         if self.rev_in:
@@ -46,6 +47,8 @@ class Model(nn.Module):
         # Y_tilde = None
         if self.rev_in:
             x = self.revin_layer(x, 'norm')
+            if self.anchor_in == 'last':   # input centred on the last value; output still de-normalised on the mean
+                x = x - x[:, -1:, :]          # beta's RevIN has no affine: plain shift by the normalised last value
         result = self.decoder(x, return_rep=return_rep) # (B, L, V, T)  # fix: was passed positionally into x_mark
         if return_rep:
             ys, reps = result
