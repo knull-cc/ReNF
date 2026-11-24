@@ -34,7 +34,12 @@ class Model(nn.Module):
         #   last   : y = x_T + s * f((x - mean) / s)
         #   linear : y = w.x + s * f(...), w (sum 1) fitted in closed form on the training split by the experiment
         self.anchor_out = getattr(configs, 'anchor_out', 'none') if self.rev_in else 'none'
-        if self.anchor_out != 'none':
+        # anchor_in=last: input centred on the last value, output still anchored on the window mean
+        # center_k=K   : input AND output centred on the mean of the last K steps (K = whole periods: phase-neutral)
+        self.anchor_in = getattr(configs, 'anchor_in', 'none') if self.rev_in else 'none'
+        self.center_k = int(getattr(configs, 'center_k', 0)) if self.rev_in else 0
+        self.custom = self.anchor_out != 'none' or self.anchor_in != 'none' or self.center_k > 0
+        if self.custom:
             self.oaw = nn.Parameter(torch.ones(V))
             self.oab = nn.Parameter(torch.zeros(V))
             self.register_buffer('anchor_w', torch.zeros(T))
@@ -49,11 +54,17 @@ class Model(nn.Module):
         return torch.sigmoid(10.0 * self.theta) if self.ewma else None
 
     def forward(self, x, return_rep=False):
-        if self.anchor_out != 'none':
-            m = x.mean(dim=1, keepdim=True).detach()
+        if self.custom:
+            m = (x[:, -self.center_k:] if self.center_k > 0 else x).mean(dim=1, keepdim=True).detach()
             s = x.std(dim=1, keepdim=True, unbiased=False).detach() + 1e-5
-            c = x[:, -1:, :] if self.anchor_out == 'last' else (x * self.anchor_w[None, :, None]).sum(dim=1, keepdim=True)
-            xn = (x - m) / s * self.oaw + self.oab
+            if self.anchor_out == 'last':
+                c = x[:, -1:, :]
+            elif self.anchor_out == 'linear':
+                c = (x * self.anchor_w[None, :, None]).sum(dim=1, keepdim=True)
+            else:
+                c = m
+            ci = x[:, -1:, :] if self.anchor_in == 'last' else m
+            xn = (x - ci) / s * self.oaw + self.oab
             y = self.net(xn.transpose(1, 2)).transpose(1, 2)
             y = (y - self.oab) / (self.oaw + 1e-10) * s + c
             return ([y], [y]) if return_rep else [y]

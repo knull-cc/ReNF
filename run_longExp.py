@@ -108,6 +108,10 @@ if __name__ == '__main__':
     parser.add_argument('--anchor_out', type=str, default='none', choices=['none', 'last', 'linear'],
                         help='SimpleMLP only: input centred on the window mean, output anchored on the last value '
                              'or on a closed-form linear level anchor fitted on the training split')
+    parser.add_argument('--anchor_in', type=str, default='none', choices=['none', 'last'],
+                        help='SimpleMLP only: input centred on the last value, output anchored on the window mean')
+    parser.add_argument('--center_k', type=int, default=0,
+                        help='SimpleMLP only: centre input and output on the mean of the last K steps (0 = whole window)')
     parser.add_argument('--revin_ewma', type=int, default=0,
                         help='SimpleMLP only: learnable anchor between window mean (a=0) and last value (a=1)')
     parser.add_argument('--revin_last', type=int, default=0,
