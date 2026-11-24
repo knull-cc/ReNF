@@ -185,6 +185,7 @@ class DecoderBlock(nn.Module):
         self.n_c = n_c
         self.fb_scale, self.fb_shuffle, self.fb_detach = 1.0, False, False  # official: not detached
         self.fb_override, self.fb_capture, self.last_out = None, False, None
+        self.fb_train_mode, self.fb_train_sigma, self.fb_train_active = 'none', 0.3, False
 
         for i in range(1, n_c):
             n_acc = i * (i + 1) // 2
@@ -207,6 +208,13 @@ class DecoderBlock(nn.Module):
             y_cat = torch.cat(out, dim=-1)
             if self.fb_detach:
                 y_cat = y_cat.detach()
+        if self.fb_train_active and self.fb_train_mode != 'none':
+            # --fb_train: perturb the feedback during the TRAINING forward pass only (switched on by Exp_Main,
+            # not via self.training, because official ReNF trains in eval mode from epoch 2 on)
+            if self.fb_train_mode == 'shuffle' and y_cat.shape[0] > 1:
+                y_cat = torch.roll(y_cat, shifts=y_cat.shape[0] // 2, dims=0)   # train batches are shuffled
+            elif self.fb_train_mode == 'gauss':
+                y_cat = y_cat + self.fb_train_sigma * y_cat.detach().std() * torch.randn_like(y_cat)
         if self.fb_shuffle and not self.training and y_cat.shape[0] > 1:
             # test-time probe: give each sample the feedback of another sample in the batch
             y_cat = torch.roll(y_cat, shifts=y_cat.shape[0] // 2, dims=0)

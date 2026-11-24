@@ -71,6 +71,11 @@ class Exp_Main(Exp_Basic):
     def _blocks(self, model):
         return [m for m in model.modules() if type(m).__name__ == 'DecoderBlock']
 
+    def _set_fb_train(self, model, active):
+        for b in self._blocks(model):
+            b.fb_train_mode, b.fb_train_sigma, b.fb_train_active = \
+                self.args.fb_train, self.args.fb_train_sigma, active
+
     def _set_fb_override(self, model, outs):
         blocks = self._blocks(model)
         for b, o in zip(blocks, outs if outs is not None else [None] * len(blocks)):
@@ -301,6 +306,9 @@ class Exp_Main(Exp_Basic):
         global_step, ema_fb_steps = 0, 0
         if use_ema_fb:
             print('fb_source=ema: EMA-model feedback from training step {}'.format(ema_start))
+        if self.args.fb_train != 'none':
+            print('fb_train={} (sigma={}): feedback perturbed in every training forward pass'.format(
+                self.args.fb_train, self.args.fb_train_sigma))
         valid_losses = []
         test_losses = []
         for epoch in range(self.args.train_epochs):
@@ -333,8 +341,12 @@ class Exp_Main(Exp_Basic):
                             if use_ema_fb and global_step >= ema_start:
                                 self._set_fb_override(self.model, self._ema_feedback(batch_x))
                                 ema_fb_steps += 1
+                            if self.args.fb_train != 'none':
+                                self._set_fb_train(self.model, True)
                             outputs = self.model(batch_x)
                             self._set_fb_override(self.model, None)
+                            if self.args.fb_train != 'none':
+                                self._set_fb_train(self.model, False)
                             n = len(outputs)
                             k = self.args.pred_len // n
                     else:

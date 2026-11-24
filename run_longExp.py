@@ -49,6 +49,12 @@ if __name__ == '__main__':
                         help='time-domain training loss (official: l1)')
     parser.add_argument('--probe', type=int, default=1,
                         help='extra test-time probes printed as probe_* lines; never change training or the mse: line')
+    parser.add_argument('--fb_train', type=str, default='none', choices=['none', 'shuffle', 'gauss'],
+                        help='perturb the stage feedback during training only: shuffle = another sample\'s '
+                             'feedback (same distribution, no content); gauss = add N(0, (sigma*std)^2). '
+                             'Test always uses the real feedback (probe_fbshuffle reports shuffled-at-test)')
+    parser.add_argument('--fb_train_sigma', type=float, default=0.3,
+                        help='noise scale for --fb_train gauss, relative to the std of the feedback')
     parser.add_argument('--cl_s', type=int, default=48,
                         help='ReNF_cl: length of the observed tail used for the closed-loop backtest error')
     parser.add_argument('--cl_use_r', type=int, default=1,
