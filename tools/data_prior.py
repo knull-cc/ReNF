@@ -20,12 +20,12 @@ import os
 import numpy as np
 import pandas as pd
 
-DATASETS = {   # name: (relative path, split rule, period in steps)
-    'etth1': ('ETT-small/ETTh1.csv', 'ett_hour', 24),
-    'etth2': ('ETT-small/ETTh2.csv', 'ett_hour', 24),
+DATASETS = {   # name: (relative path, split rule, period in steps: weekly for hourly data, daily for 10-min data)
+    'etth1': ('ETT-small/ETTh1.csv', 'ett_hour', 168),
+    'etth2': ('ETT-small/ETTh2.csv', 'ett_hour', 168),
     'weather': ('weather/weather.csv', 'custom', 144),
-    'electricity': ('electricity/electricity.csv', 'custom', 24),
-    'traffic': ('traffic/traffic.csv', 'custom', 24),
+    'electricity': ('electricity/electricity.csv', 'custom', 168),
+    'traffic': ('traffic/traffic.csv', 'custom', 168),
     'solar': ('Solar/solar_AL.txt', 'custom_txt', 144),
 }
 
@@ -97,6 +97,16 @@ def remove_profile(x, P):
     return x - prof[phase]
 
 
+def periodic_share(win, P):
+    """Share of the variance of a band (W, L, D) that is locked to the phase t mod P (mean profile over the
+    training split): the part of that band a per-variable model can predict from the clock / its own history."""
+    W, L, D = win.shape
+    flat = win.reshape(W * L, D)
+    phase = np.arange(W * L) % P
+    prof = np.stack([flat[phase == p].mean(axis=0) for p in range(P)])
+    return float((prof[phase] ** 2).sum() / max((flat ** 2).sum(), 1e-12))
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--root', default='../dataset')
@@ -119,24 +129,28 @@ def main():
         flat = lambda b: b.reshape(-1, b.shape[2])
         P = DATASETS[name][2]
         x_ds = remove_profile(x, P)
-        _, low_ds, _ = split_bands(x_ds, a.L, f1)
+        _, low_ds, high_ds = split_bands(x_ds, a.L, f1)
         low_ds = low_ds - low_ds.mean(axis=1, keepdims=True)      # remove each window's level (drift)
         rows.append(dict(dataset=name, vars=x.shape[1], windows=win.shape[0],
                          low_var_share=float((low ** 2).sum() / (win ** 2).sum()),
                          coupling_R=R_mean, coupling_R_median=R_med,
                          xvar_raw=mean_abs_corr(flat(win)), xvar_low=mean_abs_corr(flat(low)),
-                         xvar_high=mean_abs_corr(flat(high)), xvar_low_resid=mean_abs_corr(flat(low_ds))))
+                         xvar_high=mean_abs_corr(flat(high)), xvar_low_resid=mean_abs_corr(flat(low_ds)),
+                         xvar_high_resid=mean_abs_corr(flat(high_ds)), high_periodic_share=periodic_share(high, P)))
         print(f'done {name}', flush=True)
     df = pd.DataFrame(rows)
     pd.set_option('display.width', 200)
     print(f'\nL={a.L}, low band = first {f1} DCT components (periods >= {2 * a.L / f1:.0f} steps), '
-          f'envelope window {a.env_win}')
+          f'envelope window {a.env_win}; periodic profile: 168 steps (weekly) for hourly data, 144 (daily) for '
+          f'10-min data')
     print(df.to_string(index=False, float_format=lambda v: f'{v:.3f}'))
     print('\ncoupling_R: how well the high-band envelope is explained by the co-located low band '
           '(premise of multiplicative cross-scale modulation; > 0.3 = meaningful)')
     print('xvar_*: mean |corr| between variables. xvar_low_resid: low band after removing each variable\'s mean '
           'periodic profile and each window\'s level -- co-movement that cross-variable routing could exploit '
-          'beyond what each variable gets from its own history')
+          'beyond what each variable gets from its own history; xvar_high_resid: same for the high band')
+    print('high_periodic_share: share of high-band variance locked to the weekly/daily phase (predictable '
+          'structure that a modulation could scale; the rest is closer to unpredictable noise)')
 
 
 if __name__ == '__main__':
