@@ -16,7 +16,8 @@ class Model(nn.Module):
         T, V, H = d_inputs[0], d_inputs[-1], configs.pred_len
         self.rev_in = configs.revin
         if self.rev_in:
-            self.revin_layer = RevIN(V, affine=True, subtract_last=False)
+            # revin_last=1: centre on the last input value, so a zero/shrunk output means persistence
+            self.revin_layer = RevIN(V, affine=True, subtract_last=bool(getattr(configs, 'revin_last', 0)))
         if configs.model == 'RLinear':
             self.net = nn.Linear(T, H)
         else:
