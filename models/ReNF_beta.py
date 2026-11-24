@@ -62,9 +62,9 @@ class Model(nn.Module):
             return ys
 
 class Decoder(nn.Module):
-    def __init__(self, d_inputs, d_pred, n_c=3, d_ff=256, dropout=0., pe=False, exv_use=0):
+    def __init__(self, d_inputs, d_pred, n_c=3, n_b=1, d_ff=256, dropout=0., pe=False, exv_use=0, norm='instance'):
         super(Decoder, self).__init__()
-        self.receiver = DecoderBlock(d_ff, d_inputs[0], d_pred, n_c, drop_ff=dropout)
+        self.receiver = DecoderBlock(d_ff, d_inputs[0], d_pred, n_c, n_b=n_b, drop_ff=dropout, norm=norm)  # fix: official Model passes n_b / norm that Decoder did not accept
         self.d_inputs = d_inputs
         self.pred_len = d_pred
         self.pe = pe
