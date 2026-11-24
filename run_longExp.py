@@ -49,6 +49,10 @@ if __name__ == '__main__':
                         help='time-domain training loss (official: l1)')
     parser.add_argument('--probe', type=int, default=1,
                         help='extra test-time probes printed as probe_* lines; never change training or the mse: line')
+    parser.add_argument('--keep_train_mode', type=int, default=0,
+                        help='1: call model.train() at the start of every epoch. Official ReNF (0) trains in '
+                             'eval mode from epoch 2 on (vali() sets model.eval() and the switch back is '
+                             'commented out), i.e. dropout only acts in epoch 1')
     parser.add_argument('--fb_source', type=str, default='online', choices=['online', 'ema'],
                         help='online: training feedback = the online model\'s own earlier stages (official); '
                              'ema: the EMA model\'s earlier-stage forecasts (eval mode), i.e. what the evaluated '

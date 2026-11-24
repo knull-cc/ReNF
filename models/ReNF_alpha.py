@@ -143,8 +143,10 @@ class DecoderBlock(nn.Module):
 
     def _feedback(self, out):
         """Earlier-stage forecasts fed to the next stage (ablation switches; defaults = official)."""
-        if self.fb_override is not None and self.training:
-            # --fb_source ema: earlier-stage forecasts of the EMA model (no grad), set by Exp_Main
+        if self.fb_override is not None:
+            # --fb_source ema: earlier-stage forecasts of the EMA model (no grad). Exp_Main sets this only
+            # around the training forward pass (NOT conditioned on self.training: official ReNF trains in
+            # eval mode from epoch 2 on, because vali() calls model.eval() and never switches back)
             y_cat = torch.cat(self.fb_override[:len(out)], dim=-1)
         else:
             y_cat = torch.cat(out, dim=-1)

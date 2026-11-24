@@ -305,6 +305,10 @@ class Exp_Main(Exp_Basic):
         for epoch in range(self.args.train_epochs):
             iter_count = 0
             train_loss = []
+            if self.args.keep_train_mode:
+                self.model.train()
+            if epoch < 3:
+                print('epoch {}: online model in {} mode'.format(epoch + 1, 'train' if self.model.training else 'EVAL'))
 
             epoch_time = time.time()
             for i, (batch_x, batch_y, batch_x_mark, batch_y_mark) in enumerate(self.train_loader):
