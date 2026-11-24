@@ -61,6 +61,13 @@ class Exp_Main(Exp_Basic):
         L = 1
         self.d_inputs = [T, L, V]
         self.model = self._build_model().to(self.device)
+        if getattr(self.args, 'anchor_out', 'none') == 'linear':
+            w = self._fit_linear_anchor()
+            for m in self.model.modules():
+                if hasattr(m, 'anchor_w'):
+                    m.anchor_w.copy_(torch.as_tensor(w, dtype=torch.float32))
+            print('anchor_out=linear: weight on the last 1 / 24 / 96 / {} steps: {:.3f} / {:.3f} / {:.3f} / {:.3f}'.format(
+                T, w[-1], w[-24:].sum(), w[-96:].sum(), w.sum()))
         self._set_feedback(self.model, scale=0.0 if self.args.fb_mode == 'zero' else 1.0,
                            detach=None if self.args.fb_detach < 0 else bool(self.args.fb_detach))
 
@@ -178,6 +185,24 @@ class Exp_Main(Exp_Basic):
             tgt = self.model(x_s)[-1][:, :H - d, f_dim:]
         p = pred[:, d:, f_dim:]
         return (p - tgt).abs().mean() if self.args.td_loss == 'l1' else ((p - tgt) ** 2).mean()
+
+    def _fit_linear_anchor(self, max_win=6000, lam=1e-3):
+        """Closed-form level anchor w.x (sum(w) = 1) fitted on the training split only: ridge least squares of
+        the mean of the next H values on the input window, pooled over variables (channel-independent)."""
+        n = len(self.train_data)
+        idx = range(0, n, max(1, n // max_win))
+        X, Y = [], []
+        for i in idx:
+            sx, sy = self.train_data[i][0], self.train_data[i][1]
+            X.append(np.asarray(sx, dtype=np.float64).T)                 # (V, T)
+            Y.append(np.asarray(sy, dtype=np.float64)[-self.args.pred_len:].mean(axis=0))   # (V,)
+        X, Y = np.concatenate(X, axis=0), np.concatenate(Y, axis=0)
+        A = X.T @ X / len(X)
+        A += lam * np.trace(A) / len(A) * np.eye(len(A))
+        b = X.T @ Y / len(X)
+        one = np.ones(len(A))
+        Ai_b, Ai_1 = np.linalg.solve(A, b), np.linalg.solve(A, one)
+        return Ai_b - (one @ Ai_b - 1.0) / (one @ Ai_1) * Ai_1
 
     def _blocks(self, model):
         return [m for m in model.modules() if type(m).__name__ == 'DecoderBlock']

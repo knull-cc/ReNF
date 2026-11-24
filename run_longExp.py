@@ -105,6 +105,9 @@ if __name__ == '__main__':
     parser.add_argument('--stride', type=int, default=8, help='stride')
     parser.add_argument('--padding_patch', default='end', help='None: None; end: padding on the end')
     parser.add_argument('--revin', type=int, default=0, help='RevIN; True 1 False 0')
+    parser.add_argument('--anchor_out', type=str, default='none', choices=['none', 'last', 'linear'],
+                        help='SimpleMLP only: input centred on the window mean, output anchored on the last value '
+                             'or on a closed-form linear level anchor fitted on the training split')
     parser.add_argument('--revin_ewma', type=int, default=0,
                         help='SimpleMLP only: learnable anchor between window mean (a=0) and last value (a=1)')
     parser.add_argument('--revin_last', type=int, default=0,

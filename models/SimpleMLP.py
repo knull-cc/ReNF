@@ -30,6 +30,14 @@ class Model(nn.Module):
             self.aw = nn.Parameter(torch.ones(V))
             self.ab = nn.Parameter(torch.zeros(V))
             self.register_buffer('dist', torch.arange(T - 1, -1, -1, dtype=torch.float32))
+        # anchor_out (input always centred on the window mean, output anchored elsewhere; decoupled):
+        #   last   : y = x_T + s * f((x - mean) / s)
+        #   linear : y = w.x + s * f(...), w (sum 1) fitted in closed form on the training split by the experiment
+        self.anchor_out = getattr(configs, 'anchor_out', 'none') if self.rev_in else 'none'
+        if self.anchor_out != 'none':
+            self.oaw = nn.Parameter(torch.ones(V))
+            self.oab = nn.Parameter(torch.zeros(V))
+            self.register_buffer('anchor_w', torch.zeros(T))
         if configs.model == 'RLinear':
             self.net = nn.Linear(T, H)
         else:
@@ -41,6 +49,14 @@ class Model(nn.Module):
         return torch.sigmoid(10.0 * self.theta) if self.ewma else None
 
     def forward(self, x, return_rep=False):
+        if self.anchor_out != 'none':
+            m = x.mean(dim=1, keepdim=True).detach()
+            s = x.std(dim=1, keepdim=True, unbiased=False).detach() + 1e-5
+            c = x[:, -1:, :] if self.anchor_out == 'last' else (x * self.anchor_w[None, :, None]).sum(dim=1, keepdim=True)
+            xn = (x - m) / s * self.oaw + self.oab
+            y = self.net(xn.transpose(1, 2)).transpose(1, 2)
+            y = (y - self.oab) / (self.oaw + 1e-10) * s + c
+            return ([y], [y]) if return_rep else [y]
         if self.ewma:
             w = torch.softmax(self.dist[:, None] * F.logsigmoid(-10.0 * self.theta)[None, :], dim=0)   # (T, V)
             c = (x * w).sum(dim=1, keepdim=True)
