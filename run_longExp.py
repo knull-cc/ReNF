@@ -45,7 +45,7 @@ if __name__ == '__main__':
     parser.add_argument('--stage_weight', type=str, default='harmonic', choices=['harmonic', 'uniform', 'last'],
                         help='stage-loss weights: harmonic 20/(j+1) (official); uniform (same total); '
                              'last: only the final stage is supervised (same total)')
-    parser.add_argument('--time_loss', type=str, default='l1', choices=['l1', 'l2'],
+    parser.add_argument('--time_loss', type=str, default='l1', choices=['l1', 'l2', 'traj', 'huber'],
                         help='time-domain training loss (official: l1)')
     parser.add_argument('--probe', type=int, default=1,
                         help='extra test-time probes printed as probe_* lines; never change training or the mse: line')
@@ -74,6 +74,11 @@ if __name__ == '__main__':
     parser.add_argument('--eta_probe', type=int, default=0,
                         help='post-hoc shrinkage of the last stage towards the previous stage on their shared prefix; '
                              'eta fitted on the validation set, printed as eta_* lines (test-time only)')
+    parser.add_argument('--huber_delta', type=float, default=1.0, help='Huber threshold (scaled data units)')
+    parser.add_argument('--ema_warmup', type=int, default=0,
+                        help='1 = EMA decay min(r_ema, t/(t+1)): no weight on the random initialisation')
+    parser.add_argument('--probe_biascorr', type=int, default=1,
+                        help='test-time probe: add the validation mean residual to the test forecasts')
     parser.add_argument('--era_m', type=int, default=0,
                         help='cross-era gradient consensus: number of eras (0 = off, official)')
     parser.add_argument('--era_tau', type=float, default=1.0,

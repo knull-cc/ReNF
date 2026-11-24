@@ -352,6 +352,12 @@ class Exp_Main(Exp_Basic):
         # weights = (20. / (torch.arange(y_hat.shape[1], dtype=torch.float32, device=y_hat.device) + 1.0)).unsqueeze(0).unsqueeze(-1)
         if self.args.time_loss == 'l2':
             time_loss = ((y_hat - y) ** 2).mean()
+        elif self.args.time_loss == 'traj':
+            # robust across windows, quadratic within a window: Euclidean norm of each (sample, variable)
+            # residual trajectory over the horizon (a spatial-median loss), averaged over samples and variables
+            time_loss = torch.sqrt(((y_hat - y) ** 2).mean(dim=1) + 1e-8).mean()
+        elif self.args.time_loss == 'huber':
+            time_loss = torch.nn.functional.huber_loss(y_hat, y, delta=self.args.huber_delta)
         else:
             time_loss = (y_hat - y).abs().mean()
         return alpha_freq * freq_loss + (1 - alpha_freq) * time_loss
@@ -379,6 +385,7 @@ class Exp_Main(Exp_Basic):
         scheduler = torch.optim.lr_scheduler.StepLR(model_optim, step_size=2, gamma=self.args.gamma)
         self.model.train()
         self.model_pre = copy.deepcopy(self.model).requires_grad_(False)
+        ema_init_w = 1.0      # weight the EMA model still puts on the random initialisation
         use_ema_fb = self.args.fb_source == 'ema'
         if self.args.fb_ema_start >= 0:
             ema_start = self.args.fb_ema_start
@@ -484,7 +491,11 @@ class Exp_Main(Exp_Basic):
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=10.0)
                     model_optim.step()
                     with torch.no_grad():
-                        self.model_pre = self._update_model_ema(self.model_pre, self.model, decay=self.args.r_ema)
+                        decay = self.args.r_ema
+                        if self.args.ema_warmup:        # running mean until the window is full: no init weight
+                            decay = min(decay, global_step / (global_step + 1.0))
+                        ema_init_w *= decay
+                        self.model_pre = self._update_model_ema(self.model_pre, self.model, decay=decay)
                     global_step += 1
                 # store the weight of each layer
                 # if (epoch == self.args.train_epochs - 1) and (i == train_steps - 5):
@@ -497,6 +508,7 @@ class Exp_Main(Exp_Basic):
                 #     plt.savefig('weights.png')
             
             print("Epoch: {} cost time: {}".format(epoch + 1, time.time() - epoch_time))
+            print('ema_init_weight epoch {}: {:.4f}'.format(epoch + 1, ema_init_w))
             if era_keep:
                 print('era_keep epoch {}: {:.3f} of gradient entries kept'.format(epoch + 1, float(np.mean(era_keep))))
             train_loss = np.mean(train_loss)
@@ -698,6 +710,20 @@ class Exp_Main(Exp_Basic):
         mae_com, mse_com = metric(pred_coms, trues)
         print('mse:{}, mae:{}'.format(mse, mae))
         print('mse_com:{}, mae_com:{}'.format(mse_com, mae_com))   # ORACLE (uses ground truth) -- never report
+        if self.args.probe_biascorr:
+            # mean residual per (horizon step, variable) of the SAME model on the validation set, added to the
+            # test forecasts: tests whether training for the median (L1) leaves a mean bias that costs MSE
+            f_dim = -1 if self.args.features == 'MS' else 0
+            res = []
+            with torch.no_grad():
+                for bx, by, _, _ in self.vali_loader:
+                    out = self.model(bx.float().to(self.device))
+                    res.append((by.float().to(self.device)[:, :, f_dim:] - out[-1][:, :, f_dim:]).cpu().numpy())
+            bias = np.concatenate(res, axis=0).mean(axis=0, keepdims=True)
+            P = np.concatenate(all_preds, axis=0)
+            mae_b, mse_b = metric((P + bias).flatten(), trues)
+            print('probe_biascorr mse:{}, mae:{}'.format(mse_b, mae_b))
+            print('val_mean_residual_abs: {:.5f}'.format(float(np.abs(bias).mean())))
         if self.args.probe:
             mae_a, mse_a = metric(np.concatenate(all_avgs, axis=0).flatten(), trues)
             print('probe_stageavg mse:{}, mae:{}'.format(mse_a, mae_a))
