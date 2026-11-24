@@ -1,7 +1,7 @@
 from logging import raiseExceptions
 from data_provider.data_factory import data_provider
 from exp.exp_basic import Exp_Basic
-from models import ReNF_alpha, ReNF_beta, Model_test
+from models import ReNF_alpha, ReNF_beta, Model_test, ReNF_cl
 from utils.tools import EarlyStopping, adjust_learning_rate, visual, test_params_flop, ema_update, mean_filter
 from utils.metrics import metric
 from thop import profile
@@ -47,6 +47,7 @@ class Exp_Main(Exp_Basic):
             'Model_test': Model_test,
             'ReNF_alpha': ReNF_alpha,
             'ReNF_beta': ReNF_beta,
+            'ReNF_cl': ReNF_cl,
         }
         if 'ReNF' or 'test' in self.args.model:
             model = model_dict[self.args.model].Model(self.args, d_inputs=self.d_inputs).float()
@@ -515,6 +516,7 @@ class Exp_Main(Exp_Basic):
         all_pred_coms = []
         all_avgs = []
         stage_outs = []
+        all_drift = []
         # all_reps = []
         
         self.model.eval()
@@ -549,6 +551,14 @@ class Exp_Main(Exp_Basic):
                 all_avgs.append((avg / cnt.clamp(min=1))[:, :, f_dim:].detach().cpu().numpy())
                 if self.args.diag:
                     stage_outs.append([o[:, :, f_dim:].detach().cpu().numpy() for o in outputs])
+                if self.args.save_sample:
+                    # drift score (analysis only, uses the label): |mean of the horizon - mean of the last
+                    # 96 inputs| / std of the input window, averaged over variables
+                    xw = batch_x[:, :, f_dim:]
+                    tail = xw[:, -min(96, xw.shape[1]):]
+                    drift = ((batch_y[:, :, f_dim:].mean(dim=1) - tail.mean(dim=1)).abs()
+                             / (xw.std(dim=1) + 1e-5)).mean(dim=1)
+                    all_drift.append(drift.cpu().numpy())
                 # Collect batch results
                 all_preds.append(pred)
                 all_trues.append(true)
@@ -596,6 +606,10 @@ class Exp_Main(Exp_Basic):
 
         # np.save(folder_path + 'metrics.npy', np.array([mae, mse, rmse, mape, mspe,rse, corr]))
         np.save(folder_path + 'pred.npy', preds)
+        if self.args.save_sample:
+            P, Y = np.concatenate(all_preds, axis=0), np.concatenate(all_trues, axis=0)
+            np.save(folder_path + 'sample_mse.npy', ((P - Y) ** 2).mean(axis=(1, 2)))
+            np.save(folder_path + 'drift.npy', np.concatenate(all_drift, axis=0))
         # The following savings are for model analyses
         # torch.save(store, folder_path + 'store.pt')
         # torch.save(Ys, folder_path + 'Ys.pt')

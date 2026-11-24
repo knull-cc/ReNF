@@ -49,6 +49,12 @@ if __name__ == '__main__':
                         help='time-domain training loss (official: l1)')
     parser.add_argument('--probe', type=int, default=1,
                         help='extra test-time probes printed as probe_* lines; never change training or the mse: line')
+    parser.add_argument('--cl_s', type=int, default=48,
+                        help='ReNF_cl: length of the observed tail used for the closed-loop backtest error')
+    parser.add_argument('--cl_use_r', type=int, default=1,
+                        help='ReNF_cl: 1 feed r_obs to later stages; 0 feed zeros (matched control)')
+    parser.add_argument('--save_sample', type=int, default=1,
+                        help='save per-sample test MSE and a drift score to results/<setting>/ (analysis only)')
     parser.add_argument('--keep_train_mode', type=int, default=0,
                         help='1: call model.train() at the start of every epoch. Official ReNF (0) trains in '
                              'eval mode from epoch 2 on (vali() sets model.eval() and the switch back is '
