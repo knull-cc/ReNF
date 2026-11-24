@@ -105,6 +105,8 @@ if __name__ == '__main__':
     parser.add_argument('--stride', type=int, default=8, help='stride')
     parser.add_argument('--padding_patch', default='end', help='None: None; end: padding on the end')
     parser.add_argument('--revin', type=int, default=0, help='RevIN; True 1 False 0')
+    parser.add_argument('--revin_ewma', type=int, default=0,
+                        help='SimpleMLP only: learnable anchor between window mean (a=0) and last value (a=1)')
     parser.add_argument('--revin_last', type=int, default=0,
                         help='SimpleMLP only: RevIN centred on the last input value instead of the window mean')
     parser.add_argument('--affine', type=int, default=0, help='RevIN-affine; True 1 False 0')

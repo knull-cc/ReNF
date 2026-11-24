@@ -756,6 +756,10 @@ class Exp_Main(Exp_Basic):
             print('val_mean_residual_abs: {:.5f}'.format(float(np.abs(bias).mean())))
         if self.args.shrink_probe:
             self._shrink_probe()
+        if getattr(self.model, 'anchor_alpha', None) is not None:
+            a = self.model.anchor_alpha.detach().cpu().numpy()
+            print('anchor_alpha: ' + ' '.join('{:.4f}'.format(v) for v in a)
+                  + ' | effective window ~ ' + ' '.join('{:.0f}'.format(1.0 / max(v, 1e-6)) for v in a))
         if self.args.probe:
             mae_a, mse_a = metric(np.concatenate(all_avgs, axis=0).flatten(), trues)
             print('probe_stageavg mse:{}, mae:{}'.format(mse_a, mae_a))
