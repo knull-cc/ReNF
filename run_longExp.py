@@ -74,6 +74,13 @@ if __name__ == '__main__':
     parser.add_argument('--eta_probe', type=int, default=0,
                         help='post-hoc shrinkage of the last stage towards the previous stage on their shared prefix; '
                              'eta fitted on the validation set, printed as eta_* lines (test-time only)')
+    parser.add_argument('--td_lambda', type=float, default=0.0,
+                        help='Horizon-TD bootstrap: weight of the bootstrap-target loss (0 = off, official)')
+    parser.add_argument('--td_frac', type=float, default=0.25, help='Horizon-TD shift d = round(td_frac * pred_len)')
+    parser.add_argument('--td_mode', type=str, default='ema', choices=['ema', 'sym'],
+                        help='ema: one-way EMA teacher on the shifted window; sym: two-way online consistency')
+    parser.add_argument('--td_loss', type=str, default='l2', choices=['l1', 'l2'])
+    parser.add_argument('--td_start_epoch', type=int, default=1, help='first epoch (0-based) that uses the TD term')
     parser.add_argument('--diag', type=int, default=0,
                         help='print stage diagnostics (ambiguity decomposition, error correlation) as diag_* lines')
     # DLinear

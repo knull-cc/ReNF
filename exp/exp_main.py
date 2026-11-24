@@ -70,6 +70,26 @@ class Exp_Main(Exp_Basic):
                 if detach is not None:
                     m.fb_detach = detach
 
+    def _td_loss(self, pred, batch_x, batch_y, f_dim):
+        """Horizon-TD bootstrap target. The window shifted by d steps, x_s = [x[d:], y[:d]], ends d steps
+        later; its forecast steps 1..H-d are the same time points as the student's steps d+1..H.
+          td_mode=ema : target = EMA model on x_s, no gradient (one-way, teacher sees y[:d])
+          td_mode=sym : target = online model on x_s, gradient through both (two-way consistency)
+        td_frac=0 gives d=0: plain EMA self-distillation on the same window (no future information)."""
+        H = self.args.pred_len
+        d = int(round(self.args.td_frac * H))
+        x_s = torch.cat([batch_x[:, d:], batch_y[:, :d, :batch_x.shape[-1]]], dim=1) if d > 0 else batch_x
+        if self.args.td_mode == 'ema':
+            with torch.no_grad():
+                was = self.model_pre.training
+                self.model_pre.eval()
+                tgt = self.model_pre(x_s)[-1][:, :H - d, f_dim:]
+                self.model_pre.train(was)
+        else:
+            tgt = self.model(x_s)[-1][:, :H - d, f_dim:]
+        p = pred[:, d:, f_dim:]
+        return (p - tgt).abs().mean() if self.args.td_loss == 'l1' else ((p - tgt) ** 2).mean()
+
     def _blocks(self, model):
         return [m for m in model.modules() if type(m).__name__ == 'DecoderBlock']
 
@@ -311,6 +331,10 @@ class Exp_Main(Exp_Basic):
         if self.args.fb_train != 'none':
             print('fb_train={} (sigma={}): feedback perturbed in every training forward pass'.format(
                 self.args.fb_train, self.args.fb_train_sigma))
+        if self.args.td_lambda > 0:
+            print('horizon_td: mode={} d={} lambda={} loss={} from epoch {}'.format(
+                self.args.td_mode, int(round(self.args.td_frac * self.args.pred_len)), self.args.td_lambda,
+                self.args.td_loss, self.args.td_start_epoch + 1))
         valid_losses = []
         test_losses = []
         for epoch in range(self.args.train_epochs):
@@ -378,6 +402,8 @@ class Exp_Main(Exp_Basic):
                             w = total_w
                         loss += w * self.time_freq_loss(outputs[j], batch_y[:, :(j + 1) * k, f_dim:], self.args.alpha_freq)
                     # loss = self.time_freq_loss(outputs[-1], batch_y[:, :, f_dim:], self.args.alpha_freq)
+                    if self.args.td_lambda > 0 and epoch >= self.args.td_start_epoch:
+                        loss = loss + total_w * self.args.td_lambda * self._td_loss(outputs[-1], batch_x, batch_y, f_dim)
                     train_loss.append(loss.item())
   
                 if (i + 1) % 100 == 0:
