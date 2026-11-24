@@ -74,6 +74,11 @@ if __name__ == '__main__':
     parser.add_argument('--eta_probe', type=int, default=0,
                         help='post-hoc shrinkage of the last stage towards the previous stage on their shared prefix; '
                              'eta fitted on the validation set, printed as eta_* lines (test-time only)')
+    parser.add_argument('--era_m', type=int, default=0,
+                        help='cross-era gradient consensus: number of eras (0 = off, official)')
+    parser.add_argument('--era_tau', type=float, default=1.0,
+                        help='keep a gradient entry only if |mean sign over eras| >= tau (0 = no masking)')
+    parser.add_argument('--era_pseudo', type=int, default=0, help='1 = random pseudo-eras (control)')
     parser.add_argument('--td_lambda', type=float, default=0.0,
                         help='Horizon-TD bootstrap: weight of the bootstrap-target loss (0 = off, official)')
     parser.add_argument('--td_frac', type=float, default=0.25, help='Horizon-TD shift d = round(td_frac * pred_len)')

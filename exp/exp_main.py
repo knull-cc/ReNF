@@ -23,11 +23,38 @@ import copy
 warnings.filterwarnings('ignore')
 
 
+class EraBatchSampler(torch.utils.data.Sampler):
+    """Every batch holds batch_size // M training windows from each of M groups, group e at positions
+    [e*per, (e+1)*per). Real eras: M contiguous time blocks of the (time-ordered) training windows.
+    Pseudo eras (control): a seeded random partition into M groups of the same sizes."""
+    def __init__(self, n, batch_size, m, pseudo, seed):
+        self.m, self.per = m, batch_size // m
+        idx = np.random.RandomState(seed + 7).permutation(n) if pseudo else np.arange(n)
+        self.groups = [np.sort(g) for g in np.array_split(idx, m)]
+        self.n_batches = min(len(g) for g in self.groups) // self.per
+
+    def __iter__(self):
+        perms = [np.random.permutation(g) for g in self.groups]
+        for b in range(self.n_batches):
+            yield np.concatenate([p[b * self.per:(b + 1) * self.per] for p in perms]).tolist()
+
+    def __len__(self):
+        return self.n_batches
+
+
 class Exp_Main(Exp_Basic):
     def __init__(self, args):
         super(Exp_Main, self).__init__(args)
 
-        _, self.train_loader = self._get_data(flag='train')
+        self.train_data, self.train_loader = self._get_data(flag='train')
+        if self.args.era_m > 0:
+            from torch.utils.data import DataLoader
+            sampler = EraBatchSampler(len(self.train_data), self.args.batch_size, self.args.era_m,
+                                      bool(self.args.era_pseudo), self.args.random_seed)
+            self.train_loader = DataLoader(self.train_data, batch_sampler=sampler, num_workers=self.args.num_workers)
+            print('era_consensus: M={} ({} eras) tau={} | {} windows, {} per era per batch, {} batches/epoch'.format(
+                self.args.era_m, 'pseudo' if self.args.era_pseudo else 'real time-block', self.args.era_tau,
+                len(self.train_data), sampler.per, len(sampler)))
         self.vali_data, self.vali_loader = self._get_data(flag='val')
         self.test_data, self.test_loader = self._get_data(flag='test')
         B, T, V = next(iter(self.train_loader))[0].shape
@@ -70,6 +97,37 @@ class Exp_Main(Exp_Basic):
                 if detach is not None:
                     m.fb_detach = detach
 
+    def _era_backward(self, outputs, batch_y, f_dim, n, k):
+        """Per-era gradients of the training loss (equal era sizes, so their mean is the usual batch
+        gradient). Element-wise sign agreement a = |mean_e sign(g_e)| (M=4: 1 = 4-0, 0.5 = 3-1, 0 = 2-2);
+        the mean gradient is kept where a >= era_tau and zeroed elsewhere (era_tau=0: no masking).
+        Returns the kept fraction."""
+        m = self.args.era_m
+        per = batch_y.shape[0] // m
+        params = [p for p in self.model.parameters() if p.requires_grad]
+        grads = []
+        for e in range(m):
+            sl = slice(e * per, (e + 1) * per)
+            le = 0.
+            for j in range(n):
+                le = le + (20. / (j + 1)) * self.time_freq_loss(
+                    outputs[j][sl], batch_y[sl, :(j + 1) * k, f_dim:], self.args.alpha_freq)
+            grads.append(torch.autograd.grad(le, params, retain_graph=e < m - 1, allow_unused=True))
+        kept, total = 0., 0
+        for i, p in enumerate(params):
+            g = [gr[i] for gr in grads if gr[i] is not None]
+            if not g:
+                continue
+            G = torch.stack(g)
+            mean = G.mean(0)
+            if self.args.era_tau > 0:
+                mask = (torch.sign(G).mean(0).abs() >= self.args.era_tau - 1e-6).to(mean.dtype)
+                kept += mask.sum().item()
+                total += mask.numel()
+                mean = mean * mask
+            p.grad = mean
+        return kept / total if total else 1.0
+
     def _td_loss(self, pred, batch_x, batch_y, f_dim):
         """Horizon-TD bootstrap target. The window shifted by d steps, x_s = [x[d:], y[:d]], ends d steps
         later; its forecast steps 1..H-d are the same time points as the student's steps d+1..H.
@@ -78,7 +136,8 @@ class Exp_Main(Exp_Basic):
         td_frac=0 gives d=0: plain EMA self-distillation on the same window (no future information)."""
         H = self.args.pred_len
         d = int(round(self.args.td_frac * H))
-        x_s = torch.cat([batch_x[:, d:], batch_y[:, :d, :batch_x.shape[-1]]], dim=1) if d > 0 else batch_x
+        T = batch_x.shape[1]          # last T steps of [x, y[:d]]; also valid when d > T (e.g. 720 with lookback 336)
+        x_s = torch.cat([batch_x, batch_y[:, :d, :batch_x.shape[-1]]], dim=1)[:, -T:] if d > 0 else batch_x
         if self.args.td_mode == 'ema':
             with torch.no_grad():
                 was = self.model_pre.training
@@ -340,6 +399,7 @@ class Exp_Main(Exp_Basic):
         for epoch in range(self.args.train_epochs):
             iter_count = 0
             train_loss = []
+            era_keep = []
             if self.args.keep_train_mode:
                 self.model.train()
             if epoch < 3:
@@ -417,7 +477,10 @@ class Exp_Main(Exp_Basic):
                 if self.args.use_amp:
                     pass
                 else:
-                    loss.backward()
+                    if self.args.era_m > 0:
+                        era_keep.append(self._era_backward(outputs, batch_y, f_dim, n, k))
+                    else:
+                        loss.backward()
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=10.0)
                     model_optim.step()
                     with torch.no_grad():
@@ -434,6 +497,8 @@ class Exp_Main(Exp_Basic):
                 #     plt.savefig('weights.png')
             
             print("Epoch: {} cost time: {}".format(epoch + 1, time.time() - epoch_time))
+            if era_keep:
+                print('era_keep epoch {}: {:.3f} of gradient entries kept'.format(epoch + 1, float(np.mean(era_keep))))
             train_loss = np.mean(train_loss)
             vali_loss = self.vali(self.vali_data, self.vali_loader, criterion_val)  # use the same indicator as in training phase
             valid_losses.append(vali_loss)
