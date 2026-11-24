@@ -77,6 +77,8 @@ if __name__ == '__main__':
     parser.add_argument('--huber_delta', type=float, default=1.0, help='Huber threshold (scaled data units)')
     parser.add_argument('--ema_warmup', type=int, default=0,
                         help='1 = EMA decay min(r_ema, t/(t+1)): no weight on the random initialisation')
+    parser.add_argument('--shrink_probe', type=int, default=0,
+                        help='test-time probe: shrink the forecast towards the input-window mean / last value')
     parser.add_argument('--probe_biascorr', type=int, default=1,
                         help='test-time probe: add the validation mean residual to the test forecasts')
     parser.add_argument('--era_m', type=int, default=0,

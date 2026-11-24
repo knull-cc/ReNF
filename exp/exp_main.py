@@ -97,6 +97,36 @@ class Exp_Main(Exp_Basic):
                 if detach is not None:
                     m.fb_detach = detach
 
+    @torch.no_grad()
+    def _shrink_probe(self):
+        """Post-hoc shrinkage of the forecast towards a naive anchor: y = a + c * (yhat - a), with a = the mean
+        of the input window (the RevIN centre) or its last value, c on a grid. Prints validation and test MSE for
+        every c, and the test MSE at the c chosen on validation (test labels never used for that choice)."""
+        f_dim = -1 if self.args.features == 'MS' else 0
+        self.model.eval()
+
+        def collect(loader):
+            P, Y, M, L = [], [], [], []
+            for bx, by, _, _ in loader:
+                bx = bx.float().to(self.device)
+                P.append(self.model(bx)[-1][:, :, f_dim:].cpu().numpy())
+                Y.append(by[:, :, f_dim:].numpy())
+                M.append(bx[:, :, f_dim:].mean(dim=1, keepdim=True).cpu().numpy())
+                L.append(bx[:, -1:, f_dim:].cpu().numpy())
+            return [np.concatenate(z, axis=0) for z in (P, Y, M, L)]
+
+        vP, vY, vM, vL = collect(self.vali_loader)
+        tP, tY, tM, tL = collect(self.test_loader)
+        grid = np.round(np.arange(0.70, 1.1001, 0.025), 3)
+        i1 = int(np.argmin(np.abs(grid - 1.0)))
+        for name, va, ta in [('mean', vM, tM), ('last', vL, tL)]:
+            vm = [float((((va + c * (vP - va)) - vY) ** 2).mean()) for c in grid]
+            tm = [float((((ta + c * (tP - ta)) - tY) ** 2).mean()) for c in grid]
+            for c, a, b in zip(grid, vm, tm):
+                print('shrink[{}] c={:.3f} val_mse={:.6f} test_mse={:.6f}'.format(name, c, a, b))
+            i = int(np.argmin(vm))
+            print('shrink_val_c[{}] c={:.3f} test_mse={:.6f} base_test_mse={:.6f}'.format(name, grid[i], tm[i], tm[i1]))
+
     def _era_backward(self, outputs, batch_y, f_dim, n, k):
         """Per-era gradients of the training loss (equal era sizes, so their mean is the usual batch
         gradient). Element-wise sign agreement a = |mean_e sign(g_e)| (M=4: 1 = 4-0, 0.5 = 3-1, 0 = 2-2);
@@ -724,6 +754,8 @@ class Exp_Main(Exp_Basic):
             mae_b, mse_b = metric((P + bias).flatten(), trues)
             print('probe_biascorr mse:{}, mae:{}'.format(mse_b, mae_b))
             print('val_mean_residual_abs: {:.5f}'.format(float(np.abs(bias).mean())))
+        if self.args.shrink_probe:
+            self._shrink_probe()
         if self.args.probe:
             mae_a, mse_a = metric(np.concatenate(all_avgs, axis=0).flatten(), trues)
             print('probe_stageavg mse:{}, mae:{}'.format(mse_a, mae_a))

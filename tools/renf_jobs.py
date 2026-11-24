@@ -634,6 +634,53 @@ def cmd_eta(a):
           'etaoracle uses test labels and is an upper bound, never a result. prefix = the shared prefix only.')
 
 
+def cmd_shrink(a):
+    """Post-hoc forecast shrinkage towards the input-window mean / last value, from saved checkpoints."""
+    import pandas as pd
+    pd.set_option('display.width', 250)
+    jobs = select_done(a)
+    if not jobs:
+        sys.exit('no finished jobs match')
+    texts = retest(jobs, [('--shrink_probe', '1'), ('--probe_biascorr', '0'), ('--diag', '0'), ('--eta_probe', '0')],
+                   '.shrink', 'shrink_val_c', a.gpu, a.force)
+    GR = re.compile(r'^shrink\[(\w+)\] c=(\S+) val_mse=(\S+) test_mse=(\S+)', re.M)
+    VC = re.compile(r'^shrink_val_c\[(\w+)\] c=(\S+) test_mse=(\S+) base_test_mse=(\S+)', re.M)
+    rows, sel = [], []
+    for j in jobs:
+        t, key = texts[j['name']], dict(variant=j.get('variant', 'base'), dataset=j['script'], H=j['pred_len'], seed=j['seed'])
+        for anc, c, vm, tm in GR.findall(t):
+            rows.append(dict(key, anchor=anc, c=float(c), val=float(vm), test=float(tm)))
+        for anc, c, tm, bm in VC.findall(t):
+            sel.append(dict(key, anchor=anc, c_val=float(c), test_valc=float(tm), test_c1=float(bm)))
+    if not sel:
+        print('no shrink results parsed')
+        return
+    df, sd = pd.DataFrame(rows), pd.DataFrame(sel)
+    df.to_csv(LOG_ROOT / 'shrink_grid.csv', index=False)
+    sd.to_csv(LOG_ROOT / 'shrink_sel.csv', index=False)
+    keys = ['dataset', 'H', 'variant', 'anchor']
+    gm = df.groupby(keys + ['c']).test.mean().reset_index()
+    best = gm.loc[gm.groupby(keys).test.idxmin()].rename(columns={'c': 'c_oracle', 'test': 'mse_oracle'})
+    sd['d_valc'] = (sd.test_valc / sd.test_c1 - 1) * 100
+    s = sd.groupby(keys).agg(seeds=('seed', 'nunique'), mse_c1=('test_c1', 'mean'), c_val=('c_val', 'mean'),
+                             c_val_sd=('c_val', 'std'), mse_valc=('test_valc', 'mean'), d_valc=('d_valc', 'mean'),
+                             d_sd=('d_valc', 'std')).reset_index().merge(best, on=keys)
+    s['d_oracle'] = (s.mse_oracle / s.mse_c1 - 1) * 100
+    order = {v: i for i, v in enumerate(a.variants or [])}
+    s = s.sort_values(['dataset', 'H', 'anchor'], kind='stable').sort_values(
+        'variant', key=lambda c: c.map(order), kind='stable')
+    out = pd.DataFrame({'dataset': s.dataset, 'H': s.H, 'variant': s.variant, 'anchor': s.anchor, 'seeds': s.seeds,
+                        'mse(c=1)': s.mse_c1.map('{:.4f}'.format),
+                        'c_val': [f'{m:.3f} \u00b1 {d:.3f}' for m, d in zip(s.c_val, s.c_val_sd.fillna(0))],
+                        'mse(c_val)': s.mse_valc.map('{:.4f}'.format),
+                        'vs_c1': [f'{m:+.2f}% \u00b1 {d / max(n, 1) ** 0.5:.2f}' for m, d, n in zip(s.d_valc, s.d_sd.fillna(0), s.seeds)],
+                        'c_oracle': s.c_oracle.map('{:.3f}'.format), 'mse(c_oracle)': s.mse_oracle.map('{:.4f}'.format),
+                        'oracle_vs_c1': s.d_oracle.map('{:+.2f}%'.format)})
+    print(out.to_string(index=False))
+    print('\nanchor mean = input-window mean (RevIN centre), last = last input value. c_val: chosen on validation '
+          '(legitimate). c_oracle: best fixed c on test (diagnostic only, never a result).')
+
+
 # ----------------------------------------------------------------------------- main
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -676,6 +723,13 @@ def main():
     e.add_argument('--gpu', type=int, default=0)
     e.add_argument('--force', action='store_true')
 
+    s = sub.add_parser('shrink', help='post-hoc forecast shrinkage probe from saved checkpoints (no training)')
+    s.add_argument('--datasets', nargs='+', default=None)
+    s.add_argument('--variants', nargs='+', default=None, help='default: base')
+    s.add_argument('--horizons', nargs='+', type=int, default=None)
+    s.add_argument('--gpu', type=int, default=0)
+    s.add_argument('--force', action='store_true')
+
     sub.add_parser('status')
     c = sub.add_parser('collect')
     c.add_argument('--detail', action='store_true', help='also print the per-horizon table for every variant')
@@ -684,7 +738,7 @@ def main():
 
     a = ap.parse_args()
     {'build': cmd_build, 'run': cmd_run, 'status': cmd_status,
-     'collect': cmd_collect, 'stop': cmd_stop, 'diag': cmd_diag, 'eta': cmd_eta}[a.cmd](a)
+     'collect': cmd_collect, 'stop': cmd_stop, 'diag': cmd_diag, 'eta': cmd_eta, 'shrink': cmd_shrink}[a.cmd](a)
 
 
 if __name__ == '__main__':
