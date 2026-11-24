@@ -1,7 +1,7 @@
 from logging import raiseExceptions
 from data_provider.data_factory import data_provider
 from exp.exp_basic import Exp_Basic
-from models import ReNF_alpha, ReNF_beta, Model_test, ReNF_cl
+from models import ReNF_alpha, ReNF_beta, Model_test, ReNF_cl, SimpleMLP
 from utils.tools import EarlyStopping, adjust_learning_rate, visual, test_params_flop, ema_update, mean_filter
 from utils.metrics import metric
 from thop import profile
@@ -48,6 +48,8 @@ class Exp_Main(Exp_Basic):
             'ReNF_alpha': ReNF_alpha,
             'ReNF_beta': ReNF_beta,
             'ReNF_cl': ReNF_cl,
+            'SimpleMLP': SimpleMLP,
+            'RLinear': SimpleMLP,
         }
         if 'ReNF' or 'test' in self.args.model:
             model = model_dict[self.args.model].Model(self.args, d_inputs=self.d_inputs).float()
@@ -239,7 +241,7 @@ class Exp_Main(Exp_Basic):
                 if self.args.use_amp:
                     raiseExceptions ('No amp Implements')
                 else:
-                    if 'test' in self.args.model or 'ReNF' in self.args.model:
+                    if 'test' in self.args.model or 'ReNF' in self.args.model or self.args.model in ('SimpleMLP', 'RLinear'):
                         outputs = self.model_pre(batch_x)
                     else:
                         if self.args.output_attention:
@@ -337,7 +339,7 @@ class Exp_Main(Exp_Basic):
                 if self.args.use_amp:
                     pass
                 else:
-                    if 'test' in self.args.model or 'ReNF' in self.args.model:
+                    if 'test' in self.args.model or 'ReNF' in self.args.model or self.args.model in ('SimpleMLP', 'RLinear'):
                             if use_ema_fb and global_step >= ema_start:
                                 self._set_fb_override(self.model, self._ema_feedback(batch_x))
                                 ema_fb_steps += 1
@@ -543,7 +545,7 @@ class Exp_Main(Exp_Basic):
                     with torch.cuda.amp.autocast():
                         raise Exception('amp not supported')
                 else:
-                    if 'test' in self.args.model or 'ReNF' in self.args.model:
+                    if 'test' in self.args.model or 'ReNF' in self.args.model or self.args.model in ('SimpleMLP', 'RLinear'):
                         outputs, reps = self.model(batch_x, return_rep=True)
                     else:
                         raise Exception('Model not supported')
