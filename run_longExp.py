@@ -108,6 +108,26 @@ if __name__ == '__main__':
     parser.add_argument('--anchor_out', type=str, default='none', choices=['none', 'last', 'linear'],
                         help='SimpleMLP only: input centred on the window mean, output anchored on the last value '
                              'or on a closed-form linear level anchor fitted on the training split')
+    parser.add_argument('--gate', type=str, default='none', choices=['none', 'hard', 'revhard', 'exp', 'rev'],
+                        help='SimpleMLP only: horizon gate on the nonlinear path (adds a linear skip T->H)')
+    parser.add_argument('--gate_k', type=int, default=0, help='gate length / scale K (0 = pred_len // 2)')
+    parser.add_argument('--skip', type=int, default=0, help='SimpleMLP only: add a linear skip T->H')
+    parser.add_argument('--prop', type=int, default=0,
+                        help='SimpleMLP only, gate=hard: far steps also get C * stopgrad(near nonlinear output)')
+    parser.add_argument('--stage_act', type=str, default='official', choices=['official', 'last_nonlinear', 'all_linear'],
+                        help='ReNF_alpha only: stage activations (official: GELU stages, linear last stage)')
+    parser.add_argument('--fcmp', type=int, default=0,
+                        help='SimpleMLP only: F-CMP, zero-init causal multi-scale suffix-mean branch in the first layer')
+    parser.add_argument('--fcmp_alpha', type=float, default=-1.0, help='F-CMP step scale alpha (<= 0: sqrt(T / M))')
+    parser.add_argument('--fcmp_m', type=int, default=8, help='F-CMP number of suffix means (last 1, 2, 4, ... steps)')
+    parser.add_argument('--fcmp_rev', type=int, default=0, help='F-CMP control: prefix means of the first steps instead')
+    parser.add_argument('--route', type=str, default='none', choices=['none', 'hard', 'revhard', 'exp', 'revexp'],
+                        help='SimpleMLP only: per-step share of the gradient sent into the hidden layer (forward unchanged)')
+    parser.add_argument('--route_k', type=int, default=0, help='route/hw hard, revhard: number of steps (0 = pred_len // 2)')
+    parser.add_argument('--route_lam', type=float, default=2.0, help='route exp/revexp: decay rate lambda')
+    parser.add_argument('--hw', type=str, default='none', choices=['none', 'hard', 'revhard', 'exp', 'revexp'],
+                        help='SimpleMLP only: per-step scale of the whole output gradient (= per-step loss weighting)')
+    parser.add_argument('--hw_lam', type=float, default=2.0, help='hw exp/revexp: decay rate lambda')
     parser.add_argument('--anchor_in', type=str, default='none', choices=['none', 'last'],
                         help='SimpleMLP only: input centred on the last value, output anchored on the window mean')
     parser.add_argument('--center_k', type=int, default=0,

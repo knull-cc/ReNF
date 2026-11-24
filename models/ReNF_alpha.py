@@ -15,11 +15,20 @@ class Model(nn.Module):
         super(Model, self).__init__()
         self.rev_in = configs.revin
         self.anchor_in = getattr(configs, 'anchor_in', 'none')
+        self.stage_act = getattr(configs, 'stage_act', 'official')
         self.pred_len = configs.pred_len
         self.L = configs.level_dim
         if self.rev_in:
             self.revin_layer = RevIN(d_inputs[-1], affine=True, subtract_last=False)
         self.decoder = Decoder(d_inputs, self.pred_len, n_c=configs.d_layers, d_ff=configs.d_ff, dropout=configs.dropout, pe=configs.pe)
+        if self.stage_act != 'official':   # 'last_nonlinear': GELU in the last stage too; 'all_linear': no GELU anywhere
+            cas = self.decoder.receiver.cascade
+            if self.stage_act == 'last_nonlinear':
+                cas[-1].MLP[2] = Activation('nonlinear')
+            elif self.stage_act == 'all_linear':
+                cas[0].MLP[1] = nn.Identity()
+                for blk in cas[1:]:
+                    blk.MLP[2] = Activation('linear')
 
 
     def forward(self, x, return_rep=False):
